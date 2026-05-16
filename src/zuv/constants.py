@@ -1,0 +1,5 @@
+STAGING_DIRNAME = ".zuv-staging"
+ZUV_CACHE_DIRNAME = ".zuv"
+ZUV_SKIP_PLATFORM_CHECK = "ZUV_SKIP_PLATFORM_CHECK"
+ZUV_SHEBANG = "#!/usr/bin/env -S uv run --script\n"
+PAYLOAD_VAR = "_ZUV_PAYLOAD"
