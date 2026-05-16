@@ -53,7 +53,9 @@ Or point at a project explicitly:
 zuv build ./my-project -o ./dist/my-app.py -e src/main.py
 ```
 
-`zuv build` wipes `./dist/` first and writes a fresh single-file script. The entry point is resolved in this order:
+`zuv build` writes a fresh single-file script to the output path (use `--clean` to wipe the output's parent directory first). The entry point is resolved in this order:
+
+By default, `zuv build` pre-compiles every `.py` to a sourceless `.pyc` (including the entry — Python and `uv run` both execute `.pyc` directly) and ships only bytecode. This ties the build to the builder's Python minor version because of marshal-format coupling. Pass `--no-compile` to keep `.py` sources instead; the loader will compile them at first extract, and the bundle stays portable across compatible Python versions.
 
 1. `--entry`/`-e` flag
 2. `[tool.zuv].entry` in `pyproject.toml`
@@ -63,9 +65,11 @@ zuv build ./my-project -o ./dist/my-app.py -e src/main.py
 
 ```sh
 uv run dist/my-app.py
+# or, equivalently, via zuv:
+zuv run dist/my-app.py -- --any --args --you --like
 ```
 
-First run: uv extracts the bundle, creates `dist/.zuv/<name>_<hash>/.venv`, installs deps, runs your entry. Subsequent runs go straight to executing.
+The shebang + PEP 723 header makes `uv run` the canonical entrypoint; `zuv run` is a thin wrapper for users who don't want to remember which tool to invoke. First run: uv extracts the bundle, creates `dist/.zuv/<name>_<hash>/.venv`, installs deps, runs your entry. Subsequent runs go straight to executing.
 
 ## Try the included examples
 
@@ -87,7 +91,17 @@ The bundle's entry script runs with the extracted project folder as its CWD, so 
 zuv inspect dist/my-app.py
 ```
 
-Prints the entry, build hash, PEP 723 metadata, and the embedded loader. The base85 payload itself is elided so the output stays useful for LLMs and code review.
+Prints the entry, build hash, SHA-256, Python cache tag, PEP 723 metadata, and a summary of the embedded loader bytecode. The payload itself is elided so the output stays useful for LLMs and code review.
+
+## Clear caches
+
+```sh
+zuv clean              # walk cwd, remove every .zuv/ found
+zuv clean dist/        # or scope to a directory
+zuv clean dist/app.py  # or to a built file (its parent is used)
+```
+
+The runtime also honors `$ZUV_CACHE_DIR` (and `$ZUV_MAX_EXTRACT_BYTES` for the decompression-bomb cap, default 2 GiB). If the script's directory isn't writable (system bin, read-only mount), the loader automatically falls back to `$XDG_CACHE_HOME/zuv`, `%LOCALAPPDATA%\zuv`, or `~/.cache/zuv`.
 
 ## A small caveat
 
@@ -95,12 +109,13 @@ Don't name your project the same as one of its dependencies. For example, a proj
 
 ## How it works
 
-The output `.py` has four parts:
+The output `.py` has five parts:
 
 1. A `#!/usr/bin/env -S uv run --script` shebang and a PEP 723 metadata block declaring `requires-python` (no deps — uv reads those from the embedded `pyproject.toml` after extraction).
-2. `_ZUV_ENTRY` and `_ZUV_BUILD_ID` module globals.
-3. `_ZUV_PAYLOAD` — base85 of a `tar.gz` of your project tree.
-4. A ~30-line loader that decodes the payload, extracts it into `.zuv/<stem>_<hash>/`, and execs `uv run --project <extracted> <entry>`.
+2. Metadata globals: `_ZUV_ENTRY`, `_ZUV_BUILD_ID`, `_ZUV_SHA` (sha256 of decoded payload), `_ZUV_PY_TAG` (build-time Python cache tag).
+3. `_ZUV_PAYLOAD` — a deterministic `tar.xz` of your project tree, base85-encoded (uv's script runner requires UTF-8 source, which rules out raw-binary appends).
+4. `_ZUV_LOADER` — the runtime loader, `compile()`d to bytecode then `marshal`+`zlib`+base85 (opaque to casual readers; verify with `zuv inspect`).
+5. A 3-line stub that `exec`s the loader, which then verifies the payload sha, extracts into `.zuv/<stem>_<hash>/` with a `.zuv-ready` sentinel, and runs `uv run --project <extracted> <entry>`.
 
 Dependencies aren't bundled inside the `.py`. uv installs them into the extracted project's local `.venv` on first run, so binary wheels work natively and the bundle stays small.
 
@@ -111,7 +126,7 @@ src/
   pyproject.toml
   zuv/
     cli.py                 # zuv CLI (build, inspect)
-    builder.py             # tarball + base85 + emit .py
+    builder.py             # tarball + base85 + compile loader + emit .py
     inspector.py           # zuv inspect
     _loader_template.py    # runtime loader embedded in every output
     constants.py

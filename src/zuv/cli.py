@@ -1,9 +1,10 @@
 import argparse
+import subprocess
 import sys
 from pathlib import Path
 
 from . import __version__
-from .builder import build_pyz
+from .builder import build_pyz, clean_caches
 from .inspector import inspect
 
 
@@ -33,9 +34,39 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Entry script relative to project root. Default: 'src/main.py' if it exists else 'main.py', or [tool.zuv].entry.",
     )
+    build.add_argument(
+        "--clean",
+        action="store_true",
+        help="Wipe the output's parent directory before building (was implicit for dist/ in <=0.0.2).",
+    )
+    build.add_argument(
+        "--no-compile",
+        dest="keep_source",
+        action="store_true",
+        help=(
+            "Ship raw .py sources in the bundle (loader compiles them at extract "
+            "time). Default is to pre-compile to .pyc at build time, which ties "
+            "the build to the builder's Python minor version."
+        ),
+    )
 
     insp = sub.add_parser("inspect", help="Print an LLM-friendly summary of a built .py (payload elided).")
     insp.add_argument("file", help="Path to a zuv-built .py file.")
+
+    clean = sub.add_parser("clean", help="Remove .zuv/ cache directories.")
+    clean.add_argument(
+        "target",
+        nargs="?",
+        default=".",
+        help="Directory to walk (or a built .py — its parent is used). Default: cwd.",
+    )
+
+    run = sub.add_parser(
+        "run",
+        help="Run a zuv-built .py via uv (thin wrapper over `uv run`).",
+    )
+    run.add_argument("file", help="Path to a zuv-built .py file.")
+    run.add_argument("script_args", nargs=argparse.REMAINDER, help="Arguments forwarded to the script.")
 
     args = parser.parse_args(argv)
 
@@ -51,10 +82,29 @@ def main(argv: list[str] | None = None) -> int:
             project_dir=project_dir,
             output=output,
             entry=args.entry,
+            clean=args.clean,
+            keep_source=args.keep_source,
         )
 
     if args.command == "inspect":
         return inspect(Path(args.file).expanduser().resolve())
+
+    if args.command == "clean":
+        return clean_caches(Path(args.target).expanduser().resolve())
+
+    if args.command == "run":
+        target = Path(args.file).expanduser().resolve()
+        if not target.is_file():
+            print(f"error: not a file: {target}", file=sys.stderr)
+            return 2
+        try:
+            return subprocess.call(["uv", "run", str(target), *args.script_args])
+        except FileNotFoundError:
+            print(
+                "error: 'uv' not found on PATH. Install it from https://astral.sh/uv.",
+                file=sys.stderr,
+            )
+            return 127
 
     parser.print_help()
     return 1
