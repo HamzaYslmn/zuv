@@ -1,5 +1,5 @@
 [project]
-name = "fastapi"
+name = "fastapi-example"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
@@ -8,4 +8,5 @@ dependencies = [
     "fastapi",
     "python-dotenv",
     "uvicorn",
+    "zuv>=0.0.1",
 ]

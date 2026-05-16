@@ -4,6 +4,7 @@ from pathlib import Path
 
 from . import __version__
 from .builder import build_pyz
+from .inspector import inspect
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -30,8 +31,11 @@ def main(argv: list[str] | None = None) -> int:
     build.add_argument(
         "-e", "--entry",
         default=None,
-        help="Entry point in 'module:function' form. Defaults to the project's first console script.",
+        help="Entry script relative to project root. Default: 'src/main.py' if it exists else 'main.py', or [tool.zuv].entry.",
     )
+
+    insp = sub.add_parser("inspect", help="Print an LLM-friendly summary of a built .py (payload elided).")
+    insp.add_argument("file", help="Path to a zuv-built .py file.")
 
     args = parser.parse_args(argv)
 
@@ -48,6 +52,9 @@ def main(argv: list[str] | None = None) -> int:
             output=output,
             entry=args.entry,
         )
+
+    if args.command == "inspect":
+        return inspect(Path(args.file).expanduser().resolve())
 
     parser.print_help()
     return 1

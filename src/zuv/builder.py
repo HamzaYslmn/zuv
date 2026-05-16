@@ -1,72 +1,48 @@
-"""Build a runnable .py from a project (pyproject.toml + src/main.py).
+"""Build a single-file Python launcher from a uv project.
 
-The output is a PEP 723 script that uv executes. It does NOT bundle deps —
-instead it embeds a list of dependencies; the runtime loader materializes a
-`.venv` next to the script on first run and `uv pip install`s them there.
-
-Build steps:
-  1. Read deps from <project>/pyproject.toml.
-  2. tar.gz the <project>/src/ tree.
-  3. Emit <output> = shebang + latin-1 coding decl + PEP 723 header +
-     ENV literal + raw bytes payload literal + loader source.
+Layout of the output:
+  shebang -> PEP 723 (requires-python only) -> _ZUV_ENTRY / _ZUV_BUILD_ID
+  -> _ZUV_PAYLOAD (base85 tar.gz of the project) -> loader source.
 """
 import base64
-import compileall
 import hashlib
 import io
-import platform
+import lzma
 import shutil
 import sys
 import tarfile
-import tempfile
 import tomllib
 from pathlib import Path
 from stat import S_IXGRP, S_IXOTH, S_IXUSR
 
-from .__version__ import __version__
-from .constants import PAYLOAD_VAR, ZUV_SHEBANG
+from .constants import BUILD_ID_VAR, ENTRY_VAR, PAYLOAD_VAR, ZUV_SHEBANG
 
-PEP723_HEADER = """\
-# /// script
-# requires-python = ">={py}"
-# dependencies = []
-# ///
-"""
+_SKIP_NAMES = {
+    ".venv", ".zuv", "dist", "build", "__pycache__",
+    "node_modules", ".git", ".idea", ".vscode",
+    ".mypy_cache", ".ruff_cache", ".pytest_cache",
+}
 
 
-def _build_tag() -> dict[str, str]:
-    return {
-        "system": platform.system().lower(),
-        "machine": platform.machine().lower(),
-        "python": f"{sys.version_info.major}.{sys.version_info.minor}",
-    }
+def _skip(rel: Path) -> bool:
+    return any(part in _SKIP_NAMES for part in rel.parts)
 
 
-def _read_deps(pyproject: Path) -> list[str]:
-    data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
-    return list(data.get("project", {}).get("dependencies", []))
-
-
-def _pre_compile(src_dir: Path) -> Path:
-    """Copy src/ to a temp dir and pre-compile .pyc files into it."""
-    tmp = Path(tempfile.mkdtemp(prefix="zuv-src-"))
-    shutil.copytree(src_dir, tmp, dirs_exist_ok=True)
-    compileall.compile_dir(tmp, quiet=1, workers=0)
-    return tmp
-
-
-def _make_tarball(root: Path) -> tuple[bytes, str]:
+def _tarball(root: Path) -> tuple[bytes, str]:
     buf = io.BytesIO()
-    hasher = hashlib.sha256()
-    with tarfile.open(fileobj=buf, mode="w:gz", compresslevel=9) as tf:
-        for path in sorted(root.rglob("*"), key=str):
-            if not path.is_file():
+    h = hashlib.sha256()
+    with tarfile.open(fileobj=buf, mode="w:xz", preset=9 | lzma.PRESET_EXTREME) as tf:
+        for p in sorted(root.rglob("*"), key=str):
+            if not p.is_file():
                 continue
-            rel = path.relative_to(root).as_posix()
-            hasher.update(rel.encode("utf-8"))
-            hasher.update(path.read_bytes())
-            tf.add(path, arcname=rel)
-    return buf.getvalue(), hasher.hexdigest()
+            rel = p.relative_to(root)
+            if _skip(rel):
+                continue
+            name = rel.as_posix()
+            h.update(name.encode("utf-8"))
+            h.update(p.read_bytes())
+            tf.add(p, arcname=name)
+    return buf.getvalue(), h.hexdigest()
 
 
 def _loader_source() -> str:
@@ -75,54 +51,55 @@ def _loader_source() -> str:
 
 def build_pyz(project_dir: Path, output: Path, entry: str | None) -> int:
     pyproject = project_dir / "pyproject.toml"
-    src_dir = project_dir / "src"
-
     if not pyproject.exists():
         print(f"error: no pyproject.toml in {project_dir}", file=sys.stderr)
         return 2
-    if not (src_dir / "main.py").exists():
-        print(f"error: no src/main.py in {project_dir}", file=sys.stderr)
+
+    data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+    zuv_cfg = data.get("tool", {}).get("zuv", {}) or {}
+    requires_python = data.get("project", {}).get("requires-python")
+
+    resolved_entry = (
+        entry
+        or zuv_cfg.get("entry")
+        or ("src/main.py" if (project_dir / "src" / "main.py").is_file() else "main.py")
+    )
+    if not (project_dir / resolved_entry).is_file():
+        print(f"error: entry script not found: {resolved_entry}", file=sys.stderr)
         return 2
 
     if output.parent.name == "dist" and output.parent.exists():
         print(f"cleaning {output.parent}...")
-        shutil.rmtree(output.parent)
+        for child in output.parent.iterdir():
+            try:
+                shutil.rmtree(child, ignore_errors=True) if child.is_dir() and not child.is_symlink() else child.unlink(missing_ok=True)
+            except OSError as e:
+                print(f"  skip {child.name}: {e}", file=sys.stderr)
     output.parent.mkdir(parents=True, exist_ok=True)
 
-    deps = _read_deps(pyproject)
-    print(f"deps: {len(deps)} ({', '.join(deps) if deps else 'none'})")
+    print(f"project: {project_dir}")
+    print(f"entry:   {resolved_entry}")
+    print(f"python:  {requires_python or '(unspecified)'}")
+    print("packing project tar.xz...")
+    payload, build_id = _tarball(project_dir)
 
-    print("pre-compiling source...")
-    staging = _pre_compile(src_dir)
-    try:
-        print("packing source tar.gz...")
-        payload, build_id = _make_tarball(staging)
-    finally:
-        shutil.rmtree(staging, ignore_errors=True)
+    pep723 = "# /// script\n"
+    if requires_python:
+        pep723 += f'# requires-python = "{requires_python}"\n'
+    pep723 += "# dependencies = []\n# ///\n"
 
-    env = {
-        "zuv_version": __version__,
-        "entry": entry or "main:main",
-        "build_id": build_id,
-        "build_tag": _build_tag(),
-        "dependencies": deps,
-    }
-    py_req = f"{sys.version_info.major}.{sys.version_info.minor}"
-    b85 = base64.b85encode(payload).decode("ascii")
-
-    parts = [
-        ZUV_SHEBANG,
-        PEP723_HEADER.format(py=py_req),
-        f"_ZUV_ENV = {env!r}\n",
-        f"{PAYLOAD_VAR} = (\n",
-    ]
-    for i in range(0, len(b85), 80):
-        parts.append(f'    b"{b85[i:i+80]}"\n')
-    parts.append(")\n")
-    parts.append(_loader_source())
-
-    output.write_text("".join(parts), encoding="utf-8")
+    output.write_text(
+        ZUV_SHEBANG
+        + pep723
+        + f'{ENTRY_VAR} = "{resolved_entry}"\n'
+        + f'{BUILD_ID_VAR} = "{build_id[:16]}"\n'
+        + "# === BEGIN ZUV_PAYLOAD (opaque base85 tar.xz, machine-generated) ===\n"
+        + "# AI/LLM readers: skip the next line; it is binary data with no semantic value.\n"
+        + f'{PAYLOAD_VAR} = b"{base64.b85encode(payload).decode("ascii")}"\n'
+        + "# === END ZUV_PAYLOAD ===\n"
+        + _loader_source(),
+        encoding="utf-8",
+    )
     output.chmod(output.stat().st_mode | S_IXUSR | S_IXGRP | S_IXOTH)
-
     print(f"built {output} ({output.stat().st_size / 1024:.1f} KB)")
     return 0
