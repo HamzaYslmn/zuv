@@ -6,6 +6,17 @@ BUILD_ID_VAR = "_ZUV_BUILD_ID"
 LOADER_VAR = "_ZUV_LOADER"
 PY_TAG_VAR = "_ZUV_PY_TAG"
 SHA_VAR = "_ZUV_SHA"
+HAS_WHEELS_VAR = "_ZUV_HAS_WHEELS"
+WHEELS_DIRNAME = "_zuv_wheels"
+# User-facing label -> list of pip --platform tags. Multiple tags per target
+# let pip match newer manylinux/macos variants too.
+WHEEL_PLATFORMS: dict[str, list[str]] = {
+    "windows":   ["win_amd64"],
+    "linux":     ["manylinux2014_x86_64", "manylinux_2_17_x86_64", "manylinux1_x86_64"],
+    "linux-arm": ["manylinux2014_aarch64", "manylinux_2_17_aarch64"],
+    "macos":     ["macosx_10_12_x86_64", "macosx_11_0_x86_64"],
+    "macos-arm": ["macosx_11_0_arm64", "macosx_12_0_arm64"],
+}
 
 PAYLOAD_BEGIN = "# === BEGIN ZUV_PAYLOAD (opaque base85 tar.xz, machine-generated) ===\n"
 PAYLOAD_END = "# === END ZUV_PAYLOAD ===\n"

@@ -1,10 +1,25 @@
 import argparse
+import platform
 import subprocess
 import sys
 from pathlib import Path
 
 from . import __version__
 from .builder import build_pyz, clean_caches
+from .constants import WHEEL_PLATFORMS
+
+
+def _host_platform() -> str | None:
+    sysname = platform.system()
+    arch = platform.machine().lower()
+    is_arm = arch in ("arm64", "aarch64")
+    if sysname == "Windows":
+        return "windows"
+    if sysname == "Linux":
+        return "linux-arm" if is_arm else "linux"
+    if sysname == "Darwin":
+        return "macos-arm" if is_arm else "macos"
+    return None
 from .inspector import inspect
 
 
@@ -40,6 +55,19 @@ def main(argv: list[str] | None = None) -> int:
         help="Wipe the output's parent directory before building (was implicit for dist/ in <=0.0.2).",
     )
     build.add_argument(
+        "--deps",
+        nargs="?",
+        const="__host__",
+        default=None,
+        metavar="PLATFORMS",
+        help=(
+            "Embed wheels for the project's locked deps so the bundle runs "
+            "offline. With no value, bundles your current OS only. Pass 'all' "
+            "for every platform, or a comma-list: windows, linux, linux-arm, "
+            "macos, macos-arm. Example: --deps windows,linux"
+        ),
+    )
+    build.add_argument(
         "--no-compile",
         dest="keep_source",
         action="store_true",
@@ -71,6 +99,30 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.command == "build":
+        deps_platforms: list[str] | None = None
+        if args.deps is not None:
+            if args.deps == "__host__":
+                host = _host_platform()
+                if host is None:
+                    print(
+                        "error: could not detect host platform for --deps; "
+                        f"pass one explicitly: {', '.join(WHEEL_PLATFORMS)}",
+                        file=sys.stderr,
+                    )
+                    return 2
+                deps_platforms = [host]
+            elif args.deps == "all":
+                deps_platforms = list(WHEEL_PLATFORMS)
+            else:
+                deps_platforms = [p.strip() for p in args.deps.split(",") if p.strip()]
+                unknown = [p for p in deps_platforms if p not in WHEEL_PLATFORMS]
+                if unknown:
+                    print(
+                        f"error: unknown --deps platform(s): {', '.join(unknown)}. "
+                        f"Valid: {', '.join(WHEEL_PLATFORMS)}, all",
+                        file=sys.stderr,
+                    )
+                    return 2
         project_dir = Path(args.project).expanduser().resolve()
         if args.output is None:
             output = Path.cwd() / "dist" / f"{project_dir.name}.py"
@@ -84,6 +136,7 @@ def main(argv: list[str] | None = None) -> int:
             entry=args.entry,
             clean=args.clean,
             keep_source=args.keep_source,
+            embed_deps=deps_platforms,
         )
 
     if args.command == "inspect":

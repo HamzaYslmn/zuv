@@ -11,6 +11,7 @@ Globals injected by the builder above this code:
   _ZUV_PAYLOAD:  bytes base85 of tar.xz of the project
   _ZUV_SHA:      str   sha256 hex of the *decoded* tar.xz bytes
   _ZUV_PY_TAG:   str   build-time sys.implementation.cache_tag
+  _ZUV_HAS_WHEELS: bool  whether _zuv_wheels/ is embedded for offline install
 """
 import base64
 import compileall
@@ -134,9 +135,24 @@ def _run():
         )
 
     env = {k: v for k, v in os.environ.items() if k not in _DROP_ENV}
+    if _ZUV_HAS_WHEELS:  # noqa: F821
+        wheels_dir = cache / "_zuv_wheels"
+        if wheels_dir.is_dir():
+            env["UV_OFFLINE"] = "1"
+            env["UV_FIND_LINKS"] = str(wheels_dir)
+            env["UV_NO_INDEX"] = "1"
     cmd = ["uv", "run", "--project", str(cache), str(cache / _ZUV_ENTRY), *sys.argv[1:]]  # noqa: F821
     try:
-        return subprocess.call(cmd, cwd=str(cache), env=env)
+        rc = subprocess.call(cmd, cwd=str(cache), env=env)
+        if rc != 0 and _ZUV_HAS_WHEELS:  # noqa: F821
+            print(
+                "zuv: hint: this is an offline bundle with embedded wheels. "
+                "If install failed, your platform may not be in the embedded "
+                "set (win/linux/macOS x86_64+aarch64). Rebuild without --deps "
+                "for an online install, or on a matching platform.",
+                file=sys.stderr,
+            )
+        return rc
     except FileNotFoundError:
         print(
             "zuv: error: 'uv' not found on PATH. Install it from "

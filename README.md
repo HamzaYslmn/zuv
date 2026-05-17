@@ -71,6 +71,65 @@ zuv run dist/my-app.py -- --any --args --you --like
 
 The shebang + PEP 723 header makes `uv run` the canonical entrypoint; `zuv run` is a thin wrapper for users who don't want to remember which tool to invoke. First run: uv extracts the bundle, creates `dist/.zuv/<name>_<hash>/.venv`, installs deps, runs your entry. Subsequent runs go straight to executing.
 
+## Offline bundles (`--deps`)
+
+Ship your app to machines with **no internet**. zuv embeds the wheels for your locked dependencies so the recipient runs it without ever hitting PyPI.
+
+```
+default build              --deps build
++------------------+       +-----------------------+
+|  app.py  ~10 KB  |       |  app.py  ~tens of MB  |
++------------------+       |  + embedded wheels    |
+| needs internet   |       +-----------------------+
+| to install deps  |       | runs fully offline    |
++------------------+       +-----------------------+
+```
+
+### How to use it
+
+Bare `--deps` bundles for **your current OS only** (the common case — you build on Windows, you ship to Windows):
+
+```sh
+zuv build --deps
+```
+
+To target other platforms, pass labels (comma-separated) or `all`:
+
+```sh
+zuv build --deps all                   # every platform listed below
+zuv build --deps linux                 # just Linux x86_64
+zuv build --deps windows,linux         # Windows + Linux x86_64
+zuv build --deps macos-arm,linux-arm   # ARM only
+```
+
+### Available platform labels
+
+```
++-------------+----------------------+
+| label       | target               |
++-------------+----------------------+
+| windows     | Windows x86_64       |
+| linux       | Linux x86_64         |
+| linux-arm   | Linux aarch64        |
+| macos       | macOS Intel          |
+| macos-arm   | macOS Apple Silicon  |
++-------------+----------------------+
+```
+
+### Bundle size guide
+
+```
+no --deps           ~10 KB    (recipient needs internet)
+--deps (host only)  ~few MB   (one platform)
+--deps all          ~tens MB  (five platforms)
+```
+
+### Notes
+
+- Wheels are tied to the **Python minor version you build with**. A bundle built on Python 3.14 won't install offline on Python 3.13.
+- Sdist-only deps are skipped (`--only-binary=:all:`). Those packages still need the network at install time on platforms where no wheel exists.
+- The build host needs `uv` and internet access — the build itself downloads the wheels.
+
 ## Try the included examples
 
 ```sh
