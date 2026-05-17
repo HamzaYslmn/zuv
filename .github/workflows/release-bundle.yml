@@ -1,22 +1,23 @@
 name: release bundle
 
-# Build a zuv bundle and force-push it to the `latest` branch when a commit
-# message contains `release <name>`. Multi-bundle repos work the same way:
-# `release fastapi`, `release dashboard`, etc. — each commit updates only
-# its own file on `latest`.
+# Build a zuv bundle and upload it as an asset to the `latest` release when a
+# commit message contains `release <name>`. Multi-bundle repos work the same
+# way: `release fastapi`, `release dashboard`, etc. — each commit re-uploads
+# only its own asset (with --clobber), so other bundles in the release stay
+# untouched and their recipients aren't prompted to update.
 #
 # Example: a commit message of "release fastapi" builds examples/fastapi/
-# and publishes fastapi.zuv.py to the `latest` branch. Recipients' bundles,
+# and replaces fastapi.zuv.py in the `latest` release. Recipients' bundles,
 # built with
 #     zuv build examples/fastapi --update-repo <user>/<repo>
-# will see the new sha on next startup and prompt to install.
+# will see the new asset id on next startup and prompt to install.
 
 on:
   push:
     branches: [main]
 
 permissions:
-  contents: write  # we push to the `latest` branch
+  contents: write  # we create/update releases
 
 jobs:
   release:
@@ -30,16 +31,13 @@ jobs:
           msg='${{ github.event.head_commit.message }}'
           name=$(echo "$msg" | sed -n 's/.*release \([A-Za-z0-9_-]\+\).*/\1/p' | head -1)
           if [ -z "$name" ]; then
-            echo "no `release <name>` token in commit message; skipping"
+            echo "no 'release <name>' token in commit message; skipping"
             exit 78  # neutral
           fi
           echo "name=$name" >> "$GITHUB_OUTPUT"
           echo "building bundle: $name"
 
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0  # need full history to push to `latest`
-
       - uses: astral-sh/setup-uv@v3
 
       - name: install zuv
@@ -48,32 +46,20 @@ jobs:
       - name: build bundle
         run: |
           name='${{ steps.parse.outputs.name }}'
-          # Convention: source lives at examples/<name>/. Adjust if your
-          # layout differs (e.g. apps/<name>/ or just <name>/).
+          # Convention: source lives at examples/<name>/. Adjust to match
+          # your layout (e.g. apps/<name>/ or just <name>/).
           zuv build "examples/$name" -o "dist/$name.zuv.py"
 
-      - name: push to `latest` branch
+      - name: upload to `latest` release
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           name='${{ steps.parse.outputs.name }}'
           set -e
-          # Stash the just-built artifact, switch to (or create) `latest`,
-          # drop the new file in, commit, force-push.
-          cp "dist/$name.zuv.py" "/tmp/$name.zuv.py"
-          git config user.name  "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          if git ls-remote --exit-code --heads origin latest; then
-            git fetch origin latest:latest
-            git checkout latest
-          else
-            git checkout --orphan latest
-            git rm -rf . >/dev/null 2>&1 || true
-          fi
-          mv "/tmp/$name.zuv.py" "$name.zuv.py"
-          git add "$name.zuv.py"
-          git commit -m "release $name @ ${GITHUB_SHA:0:7}" || {
-            echo "no changes to commit (same sha as last release)"
-            exit 0
-          }
-          git push origin latest
+          # Create the rolling `latest` release if it doesn't exist yet.
+          gh release view latest >/dev/null 2>&1 || gh release create latest \
+            --title "Latest builds" \
+            --notes "Rolling builds of zuv bundles. Re-uploaded on each \`release <name>\` commit." \
+            --latest
+          # Replace the existing asset of the same name (or add it).
+          gh release upload latest "dist/$name.zuv.py" --clobber
