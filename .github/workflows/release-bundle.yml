@@ -41,7 +41,16 @@ jobs:
       - uses: astral-sh/setup-uv@v3
 
       - name: install zuv
-        run: uv tool install zuv
+        run: |
+          # If the checked-out repo contains zuv's own source (src/pyproject.toml
+          # with name = "zuv"), install from there so the workflow uses the
+          # exact code being committed. Otherwise install the published release.
+          if [ -f src/pyproject.toml ] && grep -q '^name = "zuv"' src/pyproject.toml; then
+            echo "dogfood: installing zuv from local source"
+            uv tool install --force ./src
+          else
+            uv tool install zuv
+          fi
 
       - name: build bundle
         run: |
