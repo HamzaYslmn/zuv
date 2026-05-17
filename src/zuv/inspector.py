@@ -1,29 +1,28 @@
 """`zuv inspect` - LLM-friendly summary of a built .py with the payload elided."""
 import base64
-import dis
-import io
-import marshal
 import re
 import sys
-import zlib
 from pathlib import Path
 
 from .constants import (
+    APP_VERSION_VAR,
     BUILD_ID_VAR,
     ENTRY_VAR,
     LOADER_BEGIN,
     LOADER_END,
-    LOADER_VAR,
     PAYLOAD_BEGIN,
     PAYLOAD_END,
     PAYLOAD_VAR,
-    PY_TAG_VAR,
     SHA_VAR,
+    UPDATE_FILE_VAR,
+    UPDATE_PROVIDER_VAR,
+    UPDATE_REPO_VAR,
+    UPDATE_TAG_VAR,
 )
 
 
 def _find_str(text: str, var: str) -> str | None:
-    m = re.search(rf'^{re.escape(var)}\s*=\s*"([^"]*)"', text, re.MULTILINE)
+    m = re.search(rf'^{re.escape(var)}\s*=\s*[\'"]([^\'"]*)[\'"]', text, re.MULTILINE)
     return m.group(1) if m else None
 
 
@@ -35,6 +34,14 @@ def _slice_b85(text: str, begin: str, end: str, var: str) -> str | None:
     block = text[b + len(begin):e]
     m = re.search(rf'{re.escape(var)}\s*=\s*b"([^"]*)"', block)
     return m.group(1) if m else None
+
+
+def _slice_section(text: str, begin: str, end: str) -> str | None:
+    b = text.find(begin)
+    e = text.find(end, b + len(begin)) if b >= 0 else -1
+    if b < 0 or e < 0:
+        return None
+    return text[b + len(begin):e]
 
 
 def _pep723_block(text: str) -> str | None:
@@ -53,9 +60,9 @@ def inspect(path: Path) -> int:
     entry = _find_str(text, ENTRY_VAR)
     build_id = _find_str(text, BUILD_ID_VAR)
     sha = _find_str(text, SHA_VAR)
-    py_tag = _find_str(text, PY_TAG_VAR)
+    version = _find_str(text, APP_VERSION_VAR)
     payload_b85 = _slice_b85(text, PAYLOAD_BEGIN, PAYLOAD_END, PAYLOAD_VAR)
-    loader_b85 = _slice_b85(text, LOADER_BEGIN, LOADER_END, LOADER_VAR)
+    loader_src = _slice_section(text, LOADER_BEGIN, LOADER_END)
     pep723 = _pep723_block(text)
 
     if entry is None or payload_b85 is None:
@@ -72,22 +79,20 @@ def inspect(path: Path) -> int:
     print(f"Entry:     {entry}")
     print(f"Build ID:  {build_id or '?'}")
     print(f"SHA-256:   {sha or '?'}")
-    print(f"Python:    {py_tag or '?'} (build-time cache tag)")
+    print(f"Version:   {version or '(unspecified)'}")
     print(f"Payload:   {len(payload_b85)} chars base85 / {payload_decoded} bytes tar.xz (elided)")
-    if loader_b85 is not None:
-        loader_blob = base64.b85decode(loader_b85)
-        try:
-            code = marshal.loads(zlib.decompress(loader_blob))
-            buf = io.StringIO()
-            dis.dis(code, file=buf, depth=0)
-            top_names = sorted(set(code.co_names))
-            print(
-                f"Loader:    {len(loader_blob)} bytes marshal+zlib "
-                f"(top-level names: {', '.join(top_names[:12])}"
-                f"{'...' if len(top_names) > 12 else ''})"
-            )
-        except Exception as e:
-            print(f"Loader:    {len(loader_blob)} bytes (decode failed: {e})")
+    if loader_src is not None:
+        lines = loader_src.count("\n")
+        print(f"Loader:    {len(loader_src)} chars / {lines} lines of Python source (portable)")
+
+    # Update config, if any
+    repo = _find_str(text, UPDATE_REPO_VAR)
+    if repo:
+        provider = _find_str(text, UPDATE_PROVIDER_VAR) or "?"
+        tag = _find_str(text, UPDATE_TAG_VAR) or "?"
+        file = _find_str(text, UPDATE_FILE_VAR) or "?"
+        print(f"Updates:   {provider}:{repo} (release {tag}, asset {file})")
+
     print()
     print("PEP 723 metadata:")
     if pep723:

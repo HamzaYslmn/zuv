@@ -1,23 +1,22 @@
-"""Runtime loader embedded (compiled + marshalled) in every zuv-built .py.
+"""Runtime loader embedded (as inline Python source) in every zuv-built .py.
 
 This module is never imported. The builder reads its source, strips this
-docstring, compiles it to a code object, marshals + zlib-compresses it, and
-embeds the blob as `_ZUV_LOADER`. A 3-line plaintext stub at the end of the
-built .py decompresses the blob and execs it.
+docstring, and pastes the rest verbatim below the metadata + payload in the
+output .py. No marshal, no compile -- the source is portable across any
+Python that supports the syntax in this file.
 
 Globals injected by the builder above this code:
-  _ZUV_ENTRY:    str   entry script path, relative to project root
-  _ZUV_BUILD_ID: str   short hash for cache namespacing
-  _ZUV_PAYLOAD:  bytes base85 of tar.xz of the project
-  _ZUV_SHA:      str   sha256 hex of the *decoded* tar.xz bytes
-  _ZUV_PY_TAG:   str   build-time sys.implementation.cache_tag
-  _ZUV_HAS_WHEELS: bool  whether _zuv_wheels/ is embedded for offline install
-  _ZUV_NO_COMPILE: bool  if True, skip the first-run .py->.pyc compile pass
+  _ZUV_ENTRY:        str   entry script path, relative to project root
+  _ZUV_BUILD_ID:     str   short hash for cache namespacing
+  _ZUV_PAYLOAD:      bytes base85 of tar.xz of the project
+  _ZUV_SHA:          str   sha256 hex of the *decoded* tar.xz bytes
+  _ZUV_HAS_WHEELS:   bool  whether _zuv_wheels/ is embedded for offline install
+  _ZUV_NO_COMPILE:   bool  if True, skip the first-run .py->.pyc compile pass
+  _ZUV_APP_VERSION:  str   [project] version from pyproject.toml at build time
   _ZUV_UPDATE_PROVIDER: str  "github" or "gitlab"
   _ZUV_UPDATE_REPO:     str  "user/repo" to self-update from (empty = disabled)
-  _ZUV_UPDATE_TAG:      str  release tag, or "latest" for /releases/latest
+  _ZUV_UPDATE_TAG:      str  release tag, or "latest" for the rolling release
   _ZUV_UPDATE_FILE:     str  asset filename inside the release
-  _ZUV_APP_VERSION:     str  [project] version from pyproject.toml at build time
 """
 import base64
 import compileall

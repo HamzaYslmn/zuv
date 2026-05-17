@@ -1,20 +1,21 @@
-"""Assemble the single-file .py bundle: tar.xz the project, compile the
-embedded loader, and emit the final text.
+"""Assemble the single-file .py bundle: tar.xz the project, paste the loader
+source inline, emit the final text.
 
-Why base85: uv's `--script` runner requires the file to be valid UTF-8.
-That rules out raw-binary appends and PEP 263 `latin-1` source tricks --
-both produce files uv refuses to run. base85 is the densest ASCII-safe
-encoding in the stdlib (~25% overhead vs base64's 33%).
+Portability: the loader is pasted as **plain Python source**, not as a
+marshalled code blob. Marshal format is tied to the Python minor version, so
+a bundle built on 3.13 would segfault on 3.14. Source is portable across any
+Python that supports the loader's syntax (>= the project's requires-python).
+
+Why base85 for the payload: uv's `--script` runner requires the file to be
+valid UTF-8. That rules out raw-binary appends and PEP 263 `latin-1` source
+tricks -- both produce files uv refuses to run. base85 is the densest
+ASCII-safe encoding in the stdlib (~25% overhead vs base64's 33%).
 """
 import base64
 import hashlib
 import io
 import lzma
-import marshal
-import sys
-import sysconfig
 import tarfile
-import zlib
 from pathlib import Path
 
 from ..constants import (
@@ -24,12 +25,10 @@ from ..constants import (
     HAS_WHEELS_VAR,
     LOADER_BEGIN,
     LOADER_END,
-    LOADER_VAR,
     NO_COMPILE_VAR,
     PAYLOAD_BEGIN,
     PAYLOAD_END,
     PAYLOAD_VAR,
-    PY_TAG_VAR,
     SHA_VAR,
     ZUV_SHEBANG,
 )
@@ -62,13 +61,19 @@ def _tarball(root: Path) -> tuple[bytes, str]:
     return buf.getvalue(), h.hexdigest()
 
 
-def _compile_loader() -> bytes:
-    """Compile + marshal + zlib the loader template into an opaque blob.
-    The loader lives at zuv/_loader_template.py (kept at package root so
-    this function can find it via __file__)."""
-    src = Path(__file__).resolve().parent.parent / "_loader_template.py"
-    code = compile(src.read_text(encoding="utf-8"), "<zuv_loader>", "exec")
-    return zlib.compress(marshal.dumps(code), 9)
+def _loader_source() -> str:
+    """Return the loader template's source code, with the leading module
+    docstring stripped (it's only useful for humans reading the template,
+    not for the embedded runtime)."""
+    src = (Path(__file__).resolve().parent.parent / "_loader_template.py").read_text(
+        encoding="utf-8"
+    )
+    # Strip the opening triple-quoted docstring to save bytes in the bundle.
+    if src.startswith('"""'):
+        end = src.find('"""', 3)
+        if end > 0:
+            src = src[end + 3 :].lstrip("\n")
+    return src
 
 
 def _b85_literal(prefix: str, data: bytes) -> str:
@@ -92,10 +97,8 @@ def emit(
     payload, build_id = _tarball(project_root)
     payload_sha = hashlib.sha256(payload).hexdigest()
 
-    print("compiling loader...")
-    loader_blob = _compile_loader()
-
-    py_tag = sys.implementation.cache_tag or sysconfig.get_config_var("SOABI") or "unknown"
+    print("embedding loader source...")
+    loader_src = _loader_source()
 
     pep723 = "# /// script\n"
     if requires_python:
@@ -110,7 +113,6 @@ def emit(
         + f'{ENTRY_VAR} = "{entry}"\n'
         + f'{BUILD_ID_VAR} = "{build_id[:16]}"\n'
         + f'{SHA_VAR} = "{payload_sha}"\n'
-        + f'{PY_TAG_VAR} = "{py_tag}"\n'
         + f'{HAS_WHEELS_VAR} = {has_wheels!r}\n'
         + f'{NO_COMPILE_VAR} = {no_compile!r}\n'
         + f'{APP_VERSION_VAR} = {app_version!r}\n'
@@ -120,27 +122,7 @@ def emit(
         + _b85_literal(PAYLOAD_VAR, payload)
         + PAYLOAD_END
         + LOADER_BEGIN
-        + _b85_literal(LOADER_VAR, loader_blob)
+        + loader_src
         + LOADER_END
-        # Bottom-of-file stub. Wrapped in try/except so any error in the
-        # marshalled loader (incl. a marshal-incompatibility ValueError from
-        # building on a different Python minor) is reported instead of
-        # swallowed by an opaque exit. A Python-tag mismatch is the most
-        # common cause; we detect it explicitly so the message is actionable.
-        + "import base64 as _b, marshal as _m, sys as _sys, zlib as _z\n"
-        + 'if __name__ == "__main__":\n'
-        + f"    _run_tag = _sys.implementation.cache_tag or ''\n"
-        + f"    if {PY_TAG_VAR} and _run_tag and {PY_TAG_VAR} != _run_tag:\n"
-        + f"        print(f'zuv: warning: bundle built for {{{PY_TAG_VAR}}} but running on {{_run_tag}}; loader may fail to unmarshal', file=_sys.stderr)\n"
-        + "    try:\n"
-        + f"        exec(_m.loads(_z.decompress(_b.b85decode({LOADER_VAR}))))\n"
-        + "    except SystemExit:\n"
-        + "        raise\n"
-        + "    except BaseException as _e:\n"
-        + "        import traceback as _tb\n"
-        + f"        print(f'zuv: fatal: {{type(_e).__name__}}: {{_e}}', file=_sys.stderr)\n"
-        + f"        print(f'zuv: bundle was built for {{{PY_TAG_VAR}}}, running on {{_run_tag}}', file=_sys.stderr)\n"
-        + "        _tb.print_exc(file=_sys.stderr)\n"
-        + "        _sys.exit(1)\n"
     )
     return text, len(payload)

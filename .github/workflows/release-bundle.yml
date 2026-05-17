@@ -39,11 +39,6 @@ jobs:
 
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v3
-        with:
-          # Match the runtime Python to whatever the bundled project requests
-          # via its pyproject. Mismatched minors produce loaders that segfault
-          # on the recipient because marshal bytecode isn't version-portable.
-          python-version: "3.14"
 
       - name: install zuv
         run: |
