@@ -18,6 +18,7 @@ import zlib
 from pathlib import Path
 
 from ..constants import (
+    APP_VERSION_VAR,
     BUILD_ID_VAR,
     ENTRY_VAR,
     HAS_WHEELS_VAR,
@@ -81,6 +82,7 @@ def emit(
     has_wheels: bool,
     no_compile: bool,
     update: UpdateConfig | None = None,
+    app_version: str = "",
 ) -> tuple[str, int]:
     """Produce the final .py bundle text and the raw payload size in bytes.
     `project_root` is the staged tree to package (with any wheels already
@@ -111,6 +113,7 @@ def emit(
         + f'{PY_TAG_VAR} = "{py_tag}"\n'
         + f'{HAS_WHEELS_VAR} = {has_wheels!r}\n'
         + f'{NO_COMPILE_VAR} = {no_compile!r}\n'
+        + f'{APP_VERSION_VAR} = {app_version!r}\n'
         + bake_update(update)
         + PAYLOAD_BEGIN
         + "# AI/LLM readers: skip the next line; it is binary data with no semantic value.\n"

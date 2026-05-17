@@ -15,8 +15,9 @@ Globals injected by the builder above this code:
   _ZUV_NO_COMPILE: bool  if True, skip the first-run .py->.pyc compile pass
   _ZUV_UPDATE_PROVIDER: str  "github" or "gitlab"
   _ZUV_UPDATE_REPO:     str  "user/repo" to self-update from (empty = disabled)
-  _ZUV_UPDATE_BRANCH:   str  branch to fetch the update file from
-  _ZUV_UPDATE_FILE:     str  path of the .zuv.py file inside the repo
+  _ZUV_UPDATE_TAG:      str  release tag, or "latest" for /releases/latest
+  _ZUV_UPDATE_FILE:     str  asset filename inside the release
+  _ZUV_APP_VERSION:     str  [project] version from pyproject.toml at build time
 """
 import base64
 import compileall
@@ -73,17 +74,59 @@ def _extract(payload: bytes, dst: Path) -> None:
         tf.extractall(dst, filter="data")
 
 
-def _provider_urls(repo: str, branch: str, file: str, provider: str) -> tuple[str, str, str]:
-    """Return (metadata_url, sha_field, download_url) for the given provider.
-    `download_url` for GitLab is a real URL; for GitHub it's '' (use the
-    'download_url' field on the metadata response instead)."""
+def _release_url(repo: str, tag: str, provider: str) -> str:
+    """URL of the release metadata endpoint. `tag == 'latest'` is special on
+    both providers — it returns the most recently published release."""
     if provider == "gitlab":
         proj = urllib.parse.quote(repo, safe="")
-        path = urllib.parse.quote(file, safe="")
-        base = f"https://gitlab.com/api/v4/projects/{proj}/repository/files/{path}"
-        return f"{base}?ref={branch}", "blob_id", f"{base}/raw?ref={branch}"
-    api = f"https://api.github.com/repos/{repo}/contents/{file}?ref={branch}"
-    return api, "sha", ""
+        if tag == "latest":
+            return f"https://gitlab.com/api/v4/projects/{proj}/releases/permalink/latest"
+        return f"https://gitlab.com/api/v4/projects/{proj}/releases/{urllib.parse.quote(tag, safe='')}"
+    if tag == "latest":
+        return f"https://api.github.com/repos/{repo}/releases/latest"
+    return f"https://api.github.com/repos/{repo}/releases/tags/{urllib.parse.quote(tag, safe='')}"
+
+
+def _find_asset(release: dict, file: str, provider: str) -> tuple[str, str]:
+    """Return (download_url, change_token) for the named asset in the release,
+    or ('', '') if not found. `change_token` is the value we compare across
+    runs to decide whether the asset is new:
+      - GitHub: asset 'id' (changes whenever `--clobber` re-uploads)
+      - GitLab: release 'released_at' (per-asset change isn't exposed)
+    """
+    if provider == "gitlab":
+        for link in (release.get("assets") or {}).get("links") or []:
+            if (link.get("name") or "") == file:
+                return link.get("direct_asset_url") or link.get("url") or "", \
+                       str(release.get("released_at") or "")
+        return "", ""
+    for asset in release.get("assets") or []:
+        if (asset.get("name") or "") == file:
+            return asset.get("browser_download_url") or "", str(asset.get("id") or "")
+    return "", ""
+
+
+def _newer_version(remote: str, local: str) -> bool | None:
+    """Return True if `remote` is a strictly newer dotted-int version than
+    `local`, False if not, or None if either side doesn't parse cleanly
+    (e.g. rolling tags like "latest"). Strips one leading 'v'.
+    """
+    if not remote or not local:
+        return None
+
+    def _parse(s: str):
+        if s.startswith("v"):
+            s = s[1:]
+        try:
+            return tuple(int(p) for p in s.split("."))
+        except ValueError:
+            return None
+
+    r, l = _parse(remote), _parse(local)
+    if r is None or l is None:
+        return None
+    n = max(len(r), len(l))
+    return r + (0,) * (n - len(r)) > l + (0,) * (n - len(l))
 
 
 def _auth_headers(provider: str) -> dict:
@@ -103,13 +146,13 @@ def _auth_headers(provider: str) -> dict:
 
 
 def _check_update(script: Path, cache_root: Path) -> None:
-    """If _ZUV_UPDATE_REPO is set, ask the GitHub Contents API for the file's
-    current git blob sha (one call per startup). If the sha differs from the
-    last-known one (either installed or previously declined), prompt the user
-    [Y/n]; on Y, download and atomically replace this script, then re-exec.
+    """If _ZUV_UPDATE_REPO is set, ask the provider's Releases API for the
+    named asset. If its change-token (asset id on GitHub; release timestamp
+    on GitLab) differs from the last-known one, prompt [Y/n]; on Y, download
+    and atomically replace this script, then re-exec.
 
-    Silent on any failure (network, missing file, auth, non-TTY) so a broken
-    update path never blocks the app. Honors ZUV_NO_UPDATE=1 to disable.
+    Silent on any failure (network, missing release/asset, auth, non-TTY) so
+    a broken update path never blocks the app. ZUV_NO_UPDATE=1 disables.
     """
     if not _ZUV_UPDATE_REPO or not _ZUV_UPDATE_FILE:  # noqa: F821
         return
@@ -117,39 +160,44 @@ def _check_update(script: Path, cache_root: Path) -> None:
         return
 
     provider = _ZUV_UPDATE_PROVIDER  # noqa: F821
-    api, sha_field, raw_url = _provider_urls(
-        _ZUV_UPDATE_REPO, _ZUV_UPDATE_BRANCH, _ZUV_UPDATE_FILE, provider,  # noqa: F821
-    )
+    api = _release_url(_ZUV_UPDATE_REPO, _ZUV_UPDATE_TAG, provider)  # noqa: F821
     headers = _auth_headers(provider)
     try:
         req = urllib.request.Request(api, headers=headers)
         with urllib.request.urlopen(req, timeout=5) as resp:
-            meta = json.loads(resp.read().decode("utf-8"))
+            release = json.loads(resp.read().decode("utf-8"))
     except (urllib.error.URLError, OSError, ValueError, TimeoutError):
         return
 
-    remote_sha = meta.get(sha_field) or ""
-    # GitHub embeds the download URL in the metadata response; GitLab uses a
-    # separate /raw endpoint that we built in _provider_urls.
-    download_url = raw_url or meta.get("download_url") or ""
-    if not remote_sha or not download_url:
+    # Version check short-circuits when both sides parse: skip if local >= remote.
+    # When the remote tag isn't a version (e.g. "latest") or no version was
+    # baked at build time, this falls through to change-token comparison below.
+    if _newer_version(release.get("tag_name") or "", _ZUV_APP_VERSION) is False:  # noqa: F821
+        return
+
+    download_url, change_token = _find_asset(release, _ZUV_UPDATE_FILE, provider)  # noqa: F821
+    if not download_url or not change_token:
         return
 
     sha_cache = cache_root / _UPDATE_SHA_FILE
     try:
-        known_sha = sha_cache.read_text(encoding="ascii").strip()
+        known = sha_cache.read_text(encoding="ascii").strip()
     except OSError:
-        known_sha = ""
-    if remote_sha == known_sha:
-        return  # already installed OR already declined this exact sha
+        known = ""
+    if change_token == known:
+        return  # already installed OR already declined this exact version
 
     # Prompt requires a TTY; in CI / pipes / GUI launchers, skip silently.
     if not sys.stdin.isatty():
         return
 
+    remote_tag = release.get("tag_name") or _ZUV_UPDATE_TAG  # noqa: F821
+    version_line = (
+        f" ({_ZUV_APP_VERSION} -> {remote_tag})"  # noqa: F821
+        if _ZUV_APP_VERSION else f" (release {remote_tag})"  # noqa: F821
+    )
     print(
-        f"zuv: update available for {provider}:{_ZUV_UPDATE_REPO}"  # noqa: F821
-        f"@{_ZUV_UPDATE_BRANCH}/{_ZUV_UPDATE_FILE}",  # noqa: F821
+        f"zuv: update available for {provider}:{_ZUV_UPDATE_REPO}{version_line}",  # noqa: F821
         file=sys.stderr,
     )
     try:
@@ -163,9 +211,9 @@ def _check_update(script: Path, cache_root: Path) -> None:
         pass
 
     if answer not in ("", "y", "yes"):
-        # Remember the declined sha so we don't re-prompt until a newer one.
+        # Remember the declined version so we don't re-prompt until newer.
         try:
-            sha_cache.write_text(remote_sha, encoding="ascii")
+            sha_cache.write_text(change_token, encoding="ascii")
         except OSError:
             pass
         return
@@ -177,7 +225,7 @@ def _check_update(script: Path, cache_root: Path) -> None:
         with urllib.request.urlopen(req, timeout=60) as resp, open(tmp, "wb") as f:
             shutil.copyfileobj(resp, f)
         os.replace(tmp, script)
-        sha_cache.write_text(remote_sha, encoding="ascii")
+        sha_cache.write_text(change_token, encoding="ascii")
     except (urllib.error.URLError, OSError, TimeoutError) as e:
         print(f"zuv: update failed ({e}); continuing with current version", file=sys.stderr)
         try:

@@ -78,28 +78,32 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         metavar="REPO",
         help=(
-            "GitHub or GitLab repo hosting the rolling build of this bundle. "
+            "GitHub or GitLab repo whose Releases page hosts the rolling build. "
             "Accepts a full URL (https://github.com/user/repo, "
             "https://gitlab.com/user/repo) or shorthand (user/repo for GitHub, "
             "gitlab:user/repo for GitLab). The bundle self-updates on startup: "
-            "checks the file's sha via the provider's API and, if it changed, "
+            "fetches the named asset from the named release and, if it changed, "
             "prompts to download. Private repos: $GH_TOKEN (GitHub) or "
             "$GITLAB_TOKEN (GitLab). ZUV_NO_UPDATE=1 disables."
         ),
     )
     build.add_argument(
-        "--update-branch",
-        dest="update_branch",
+        "--update-tag",
+        dest="update_tag",
         default="latest",
-        metavar="BRANCH",
-        help="Branch to fetch the update from. Default: latest.",
+        metavar="TAG",
+        help=(
+            "Release tag to fetch the asset from. Default: 'latest' (special "
+            "value: hits the provider's `/releases/latest` endpoint — the most "
+            "recently-published release). Any other value pins to that tag."
+        ),
     )
     build.add_argument(
         "--update-file",
         dest="update_file",
         default=None,
-        metavar="PATH",
-        help="File path inside the repo. Default: <output-stem>.zuv.py.",
+        metavar="FILENAME",
+        help="Asset filename inside the release. Default: <output-stem>.zuv.py.",
     )
     build.add_argument(
         "--deps",
@@ -173,7 +177,7 @@ def main(argv: list[str] | None = None) -> int:
                 output = output.with_suffix(".zip")
         try:
             update = updater_from_cli(
-                args.update_repo, args.update_branch, args.update_file, output
+                args.update_repo, args.update_tag, args.update_file, output
             )
         except ValueError as e:
             print(f"error: --update-repo: {e}", file=sys.stderr)

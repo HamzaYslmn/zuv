@@ -39,7 +39,9 @@ def build_pyz(
 
     data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
     zuv_cfg = data.get("tool", {}).get("zuv", {}) or {}
-    requires_python = data.get("project", {}).get("requires-python")
+    project_cfg = data.get("project", {})
+    requires_python = project_cfg.get("requires-python")
+    app_version = str(project_cfg.get("version", "") or "")
 
     resolved_entry = _resolve_entry(project_dir, entry, zuv_cfg)
     if resolved_entry is None:
@@ -50,6 +52,7 @@ def build_pyz(
 
     print(f"project: {project_dir}")
     print(f"entry:   {resolved_entry}")
+    print(f"version: {app_version or '(unspecified)'}")
     print(f"python:  {requires_python or '(unspecified)'}")
     if update is not None:
         print(f"updates: {describe_update(update)}")
@@ -76,7 +79,7 @@ def build_pyz(
 
         text, payload_size = pack.emit(
             tar_root, resolved_entry, requires_python,
-            has_wheels, no_compile, update,
+            has_wheels, no_compile, update, app_version,
         )
     finally:
         if stage_root is not None:
