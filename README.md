@@ -80,3 +80,4 @@ Don't name your project the same as one of its dependencies (`fastapi` depending
 zuv build examples/bigtest && uv run dist/bigtest.zuv.py
 zuv build examples/fastapi && uv run dist/fastapi.zuv.py
 ```
+
