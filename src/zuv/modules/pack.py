@@ -122,8 +122,25 @@ def emit(
         + LOADER_BEGIN
         + _b85_literal(LOADER_VAR, loader_blob)
         + LOADER_END
-        + "import base64 as _b, marshal as _m, zlib as _z\n"
+        # Bottom-of-file stub. Wrapped in try/except so any error in the
+        # marshalled loader (incl. a marshal-incompatibility ValueError from
+        # building on a different Python minor) is reported instead of
+        # swallowed by an opaque exit. A Python-tag mismatch is the most
+        # common cause; we detect it explicitly so the message is actionable.
+        + "import base64 as _b, marshal as _m, sys as _sys, zlib as _z\n"
         + 'if __name__ == "__main__":\n'
-        + f"    exec(_m.loads(_z.decompress(_b.b85decode({LOADER_VAR}))))\n"
+        + f"    _run_tag = _sys.implementation.cache_tag or ''\n"
+        + f"    if {PY_TAG_VAR} and _run_tag and {PY_TAG_VAR} != _run_tag:\n"
+        + f"        print(f'zuv: warning: bundle built for {{{PY_TAG_VAR}}} but running on {{_run_tag}}; loader may fail to unmarshal', file=_sys.stderr)\n"
+        + "    try:\n"
+        + f"        exec(_m.loads(_z.decompress(_b.b85decode({LOADER_VAR}))))\n"
+        + "    except SystemExit:\n"
+        + "        raise\n"
+        + "    except BaseException as _e:\n"
+        + "        import traceback as _tb\n"
+        + f"        print(f'zuv: fatal: {{type(_e).__name__}}: {{_e}}', file=_sys.stderr)\n"
+        + f"        print(f'zuv: bundle was built for {{{PY_TAG_VAR}}}, running on {{_run_tag}}', file=_sys.stderr)\n"
+        + "        _tb.print_exc(file=_sys.stderr)\n"
+        + "        _sys.exit(1)\n"
     )
     return text, len(payload)
