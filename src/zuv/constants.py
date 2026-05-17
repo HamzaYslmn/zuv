@@ -7,6 +7,7 @@ LOADER_VAR = "_ZUV_LOADER"
 PY_TAG_VAR = "_ZUV_PY_TAG"
 SHA_VAR = "_ZUV_SHA"
 HAS_WHEELS_VAR = "_ZUV_HAS_WHEELS"
+NO_COMPILE_VAR = "_ZUV_NO_COMPILE"
 WHEELS_DIRNAME = "_zuv_wheels"
 # User-facing label -> list of pip --platform tags. Multiple tags per target
 # let pip match newer manylinux/macos variants too.

@@ -55,6 +55,16 @@ def main(argv: list[str] | None = None) -> int:
         help="Wipe the output's parent directory before building (was implicit for dist/ in <=0.0.2).",
     )
     build.add_argument(
+        "--no-compile",
+        dest="no_compile",
+        action="store_true",
+        help=(
+            "Tell the loader to skip the on-first-run .py->.pyc compile step. "
+            "The extracted cache stays as plain .py sources (no __pycache__/). "
+            "Slower per-import startup; useful when bytecode files are undesired."
+        ),
+    )
+    build.add_argument(
         "--deps",
         nargs="?",
         const="__host__",
@@ -67,17 +77,6 @@ def main(argv: list[str] | None = None) -> int:
             "macos, macos-arm. Example: --deps windows,linux"
         ),
     )
-    build.add_argument(
-        "--no-compile",
-        dest="keep_source",
-        action="store_true",
-        help=(
-            "Ship raw .py sources in the bundle (loader compiles them at extract "
-            "time). Default is to pre-compile to .pyc at build time, which ties "
-            "the build to the builder's Python minor version."
-        ),
-    )
-
     insp = sub.add_parser("inspect", help="Print an LLM-friendly summary of a built .py (payload elided).")
     insp.add_argument("file", help="Path to a zuv-built .py file.")
 
@@ -135,8 +134,8 @@ def main(argv: list[str] | None = None) -> int:
             output=output,
             entry=args.entry,
             clean=args.clean,
-            keep_source=args.keep_source,
             embed_deps=deps_platforms,
+            no_compile=args.no_compile,
         )
 
     if args.command == "inspect":

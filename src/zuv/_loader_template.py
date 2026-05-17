@@ -12,6 +12,7 @@ Globals injected by the builder above this code:
   _ZUV_SHA:      str   sha256 hex of the *decoded* tar.xz bytes
   _ZUV_PY_TAG:   str   build-time sys.implementation.cache_tag
   _ZUV_HAS_WHEELS: bool  whether _zuv_wheels/ is embedded for offline install
+  _ZUV_NO_COMPILE: bool  if True, skip the first-run .py->.pyc compile pass
 """
 import base64
 import compileall
@@ -66,13 +67,6 @@ def _extract(payload: bytes, dst: Path) -> None:
 def _run():
     script = Path(sys.argv[0]).resolve()
 
-    if sys.implementation.cache_tag != _ZUV_PY_TAG:  # noqa: F821
-        print(
-            f"zuv: warning: built for {_ZUV_PY_TAG} but running on "  # noqa: F821
-            f"{sys.implementation.cache_tag}; bytecode/marshal compat not guaranteed",
-            file=sys.stderr,
-        )
-
     cache_root = _cache_root(script)
     cache = cache_root / f"{script.stem}_{_ZUV_BUILD_ID}"  # noqa: F821
     ready = cache / _READY
@@ -116,23 +110,34 @@ def _run():
         # Pre-compile .py -> .pyc for the target Python so imports skip the
         # source-compile step on every run. Quiet, best-effort: a syntax error
         # in user code shouldn't block the run (uv will surface it on import).
-        try:
-            compileall.compile_dir(
-                str(cache),
-                quiet=1,
-                force=False,
-                legacy=False,
-                workers=0,
-            )
-        except Exception as e:
-            print(f"zuv: warning: bytecode pre-compile skipped: {e}", file=sys.stderr)
+        if not _ZUV_NO_COMPILE:  # noqa: F821
+            try:
+                compileall.compile_dir(
+                    str(cache),
+                    quiet=1,
+                    force=False,
+                    legacy=False,
+                    workers=0,
+                )
+            except Exception as e:
+                print(f"zuv: warning: bytecode pre-compile skipped: {e}", file=sys.stderr)
 
         ready.write_text(_ZUV_SHA, encoding="ascii")  # noqa: F821
-        print(
-            f"zuv: cached at {cache} ({time.monotonic() - t0:.1f}s); "
-            f"future runs skip extraction",
-            file=sys.stderr,
-        )
+
+        removed = 0
+        prefix = f"{script.stem}_"
+        for sibling in cache_root.iterdir():
+            if sibling == cache or not sibling.name.startswith(prefix):
+                continue
+            if not sibling.is_dir() or sibling.is_symlink():
+                continue
+            shutil.rmtree(sibling, ignore_errors=True)
+            removed += 1
+
+        msg = f"zuv: cached at {cache} ({time.monotonic() - t0:.1f}s)"
+        if removed:
+            msg += f"; gc'd {removed} old build{'s' if removed != 1 else ''}"
+        print(msg + "; future runs skip extraction", file=sys.stderr)
 
     env = {k: v for k, v in os.environ.items() if k not in _DROP_ENV}
     if _ZUV_HAS_WHEELS:  # noqa: F821
@@ -154,9 +159,15 @@ def _run():
             )
         return rc
     except FileNotFoundError:
+        if os.name == "nt":
+            install = 'powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"'
+        else:
+            install = "curl -LsSf https://astral.sh/uv/install.sh | sh"
         print(
-            "zuv: error: 'uv' not found on PATH. Install it from "
-            "https://astral.sh/uv and try again.",
+            "zuv: error: 'uv' not found on PATH.\n"
+            "      This bundle needs uv to run. Install it (30s, ships its own Python):\n"
+            f"        {install}\n"
+            "      Or see https://astral.sh/uv",
             file=sys.stderr,
         )
         return 127

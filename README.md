@@ -53,9 +53,11 @@ Or point at a project explicitly:
 zuv build ./my-project -o ./dist/my-app.py -e src/main.py
 ```
 
-`zuv build` writes a fresh single-file script to the output path (use `--clean` to wipe the output's parent directory first). The entry point is resolved in this order:
+`zuv build` writes a fresh single-file script to the output path (use `--clean` to wipe the output's parent directory first).
 
-By default, `zuv build` pre-compiles every `.py` to a sourceless `.pyc` (including the entry — Python and `uv run` both execute `.pyc` directly) and ships only bytecode. This ties the build to the builder's Python minor version because of marshal-format coupling. Pass `--no-compile` to keep `.py` sources instead; the loader will compile them at first extract, and the bundle stays portable across compatible Python versions.
+Bundles ship `.py` sources, not pre-compiled bytecode. On first run the loader compiles `.pyc` files on the recipient's machine, so the same bundle works across operating systems **and** across Python minor versions.
+
+Entry point resolution:
 
 1. `--entry`/`-e` flag
 2. `[tool.zuv].entry` in `pyproject.toml`
@@ -129,6 +131,10 @@ no --deps           ~10 KB    (recipient needs internet)
 - Wheels are tied to the **Python minor version you build with**. A bundle built on Python 3.14 won't install offline on Python 3.13.
 - Sdist-only deps are skipped (`--only-binary=:all:`). Those packages still need the network at install time on platforms where no wheel exists.
 - The build host needs `uv` and internet access — the build itself downloads the wheels.
+
+### What `--deps` can't ship: system libraries
+
+Some packages (OpenCV, PySide/PyQt, psycopg2, ...) load **OS-level shared libraries** at import time — `libGL.so.1`, `libpq.so.5`, etc. Wheels can't bundle those; on a bare Linux server the bundle installs fine but errors at first import with `ImportError: libGL.so.1: cannot open shared object file`. Install the named lib once with your distro's package manager (`apt install libgl1`, `apk add mesa-gl`, etc.) and the bundle runs. Prefer `-headless` variants where they exist (e.g. `opencv-python-headless`) to avoid the issue entirely.
 
 ## Try the included examples
 

@@ -12,7 +12,7 @@ from rich.table import Table
 
 class Report(BaseModel):
     name: str = "bigtest"
-    version: str = "0.1.0"
+    version: str = "0.1.1"
     python: str = Field(default_factory=lambda: sys.version.split()[0])
     args: list[str] = Field(default_factory=list)
 

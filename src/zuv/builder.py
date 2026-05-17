@@ -17,7 +17,6 @@ import io
 import lzma
 import marshal
 import os
-import py_compile
 import shutil
 import stat
 import subprocess
@@ -33,6 +32,7 @@ from .constants import (
     BUILD_ID_VAR,
     ENTRY_VAR,
     HAS_WHEELS_VAR,
+    NO_COMPILE_VAR,
     LOADER_BEGIN,
     LOADER_END,
     LOADER_VAR,
@@ -92,46 +92,6 @@ def _compile_loader() -> bytes:
 
 def _b85_literal(prefix: str, data: bytes) -> str:
     return f'{prefix} = b"{base64.b85encode(data).decode("ascii")}"\n'
-
-
-def _stage_compiled(project_dir: Path, entry_rel: str) -> tuple[Path, str]:
-    """Copy project to a tempdir, compile every .py to a sourceless .pyc
-    next to it, drop the .py.
-
-    Returns (staged_project_root, new_entry_rel). Caller cleans up the parent.
-    `.pyc` files land beside where the `.py` was (NOT in __pycache__/), so
-    Python's SourcelessFileLoader finds them after the `.py` is gone. The
-    entry is compiled too -- `uv run --project <dir> <entry.pyc>` works.
-    Tied to the builder's Python minor version (marshal magic).
-    """
-    stage_root = Path(tempfile.mkdtemp(prefix="zuv-stage-"))
-    proj = stage_root / "p"
-
-    def _ignore(_dir: str, names: list[str]) -> list[str]:
-        return [n for n in names if n in _SKIP_NAMES]
-
-    shutil.copytree(project_dir, proj, ignore=_ignore)
-    entry_src = (proj / entry_rel).resolve()
-    new_entry_rel = entry_rel
-
-    compiled = skipped = 0
-    for py in sorted(proj.rglob("*.py")):
-        rel = py.relative_to(proj)
-        if _skip(rel):
-            continue
-        try:
-            pyc = py.with_suffix(".pyc")
-            py_compile.compile(str(py), cfile=str(pyc), doraise=True)
-            if py.resolve() == entry_src:
-                new_entry_rel = pyc.relative_to(proj).as_posix()
-            py.unlink()
-            compiled += 1
-        except (py_compile.PyCompileError, SyntaxError) as e:
-            print(f"  warn: skipped {rel}: {e}", file=sys.stderr)
-            skipped += 1
-
-    print(f"compiled: {compiled} .py -> .pyc, {skipped} skipped, entry -> {new_entry_rel}")
-    return proj, new_entry_rel
 
 
 def _stage_copy(project_dir: Path) -> Path:
@@ -230,8 +190,8 @@ def build_pyz(
     output: Path,
     entry: str | None,
     clean: bool = False,
-    keep_source: bool = False,
     embed_deps: list[str] | None = None,
+    no_compile: bool = False,
 ) -> int:
     pyproject = project_dir / "pyproject.toml"
     if not pyproject.exists():
@@ -262,18 +222,12 @@ def build_pyz(
     stage_root: Path | None = None
     has_wheels = False
     try:
-        if keep_source:
-            if embed_deps is not None:
-                print("keeping .py sources (--no-compile); staging copy for wheels")
-                tar_root = _stage_copy(project_dir)
-                stage_root = tar_root.parent
-            else:
-                print("keeping .py sources (--no-compile); loader will compile at extract time")
-                tar_root = project_dir
-        else:
-            print(f"compiling .py -> .pyc for {sys.implementation.cache_tag}...")
-            tar_root, resolved_entry = _stage_compiled(project_dir, resolved_entry)
+        if embed_deps is not None:
+            tar_root = _stage_copy(project_dir)
             stage_root = tar_root.parent
+        else:
+            tar_root = project_dir
+        print("shipping .py sources; loader will compile to .pyc on first run")
 
         if embed_deps is not None:
             print(f"embedding wheels for: {', '.join(embed_deps)}")
@@ -314,6 +268,7 @@ def build_pyz(
         + f'{SHA_VAR} = "{payload_sha}"\n'
         + f'{PY_TAG_VAR} = "{py_tag}"\n'
         + f'{HAS_WHEELS_VAR} = {has_wheels!r}\n'
+        + f'{NO_COMPILE_VAR} = {no_compile!r}\n'
         + PAYLOAD_BEGIN
         + "# AI/LLM readers: skip the next line; it is binary data with no semantic value.\n"
         + _b85_literal(PAYLOAD_VAR, payload)
