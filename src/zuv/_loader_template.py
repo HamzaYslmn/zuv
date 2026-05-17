@@ -39,6 +39,14 @@ _DROP_ENV = ("VIRTUAL_ENV", "UV_PROJECT_ENVIRONMENT", "PYTHONHOME", "PYTHONPATH"
 _READY = ".zuv-ready"
 _MAX_BYTES = int(os.environ.get("ZUV_MAX_EXTRACT_BYTES", str(2 * 1024 * 1024 * 1024)))
 _UPDATE_SHA_FILE = ".zuv-update-known-sha"  # last sha seen (installed or declined)
+_DEBUG = bool(os.environ.get("ZUV_DEBUG"))
+
+
+def _dbg(msg: str) -> None:
+    """Print a diagnostic line iff ZUV_DEBUG=1. Lets users introspect the
+    update path's decisions without altering normal-quiet behaviour."""
+    if _DEBUG:
+        print(f"zuv[debug]: {msg}", file=sys.stderr, flush=True)
 
 
 def _cache_root(script: Path) -> Path:
@@ -145,65 +153,80 @@ def _auth_headers(provider: str) -> dict:
     return headers
 
 
-def _check_update(script: Path, cache_root: Path) -> None:
-    """If _ZUV_UPDATE_REPO is set, ask the provider's Releases API for the
-    named asset. If its change-token (asset id on GitHub; release timestamp
-    on GitLab) differs from the last-known one, prompt [Y/n]; on Y, download
-    and atomically replace this script, then re-exec.
-
-    Silent on any failure (network, missing release/asset, auth, non-TTY) so
-    a broken update path never blocks the app. ZUV_NO_UPDATE=1 disables.
-    """
+def _check_update_inner(script: Path, cache_root: Path) -> None:
+    """Implementation of the update check. Raises on any non-network error;
+    the outer wrapper catches everything to keep production silent."""
     if not _ZUV_UPDATE_REPO or not _ZUV_UPDATE_FILE:  # noqa: F821
+        _dbg("update disabled (no _ZUV_UPDATE_REPO or _ZUV_UPDATE_FILE)")
         return
     if os.environ.get("ZUV_NO_UPDATE"):
+        _dbg("update disabled (ZUV_NO_UPDATE=1)")
         return
 
     provider = _ZUV_UPDATE_PROVIDER  # noqa: F821
     api = _release_url(_ZUV_UPDATE_REPO, _ZUV_UPDATE_TAG, provider)  # noqa: F821
     headers = _auth_headers(provider)
+    _dbg(f"GET {api}")
     try:
         req = urllib.request.Request(api, headers=headers)
         with urllib.request.urlopen(req, timeout=5) as resp:
             release = json.loads(resp.read().decode("utf-8"))
-    except (urllib.error.URLError, OSError, ValueError, TimeoutError):
+    except (urllib.error.URLError, OSError, ValueError, TimeoutError) as e:
+        _dbg(f"release API call failed: {e!r}")
         return
+
+    remote_tag = release.get("tag_name") or ""
+    _dbg(f"release tag_name={remote_tag!r}, local _ZUV_APP_VERSION={_ZUV_APP_VERSION!r}")  # noqa: F821
 
     # Version check short-circuits when both sides parse: skip if local >= remote.
     # When the remote tag isn't a version (e.g. "latest") or no version was
     # baked at build time, this falls through to change-token comparison below.
-    if _newer_version(release.get("tag_name") or "", _ZUV_APP_VERSION) is False:  # noqa: F821
+    newer = _newer_version(remote_tag, _ZUV_APP_VERSION)  # noqa: F821
+    if newer is False:
+        _dbg("local version >= remote; skipping")
         return
+    _dbg(f"version-check result: newer={newer!r} (None = fall through to change-token)")
 
     download_url, change_token = _find_asset(release, _ZUV_UPDATE_FILE, provider)  # noqa: F821
     if not download_url or not change_token:
+        _dbg(f"asset not found in release (looking for {_ZUV_UPDATE_FILE!r})")  # noqa: F821
         return
+    _dbg(f"asset found: change_token={change_token!r}, download_url={download_url}")
 
     sha_cache = cache_root / _UPDATE_SHA_FILE
     try:
         known = sha_cache.read_text(encoding="ascii").strip()
     except OSError:
         known = ""
+    _dbg(f"cached known token={known!r}")
     if change_token == known:
-        return  # already installed OR already declined this exact version
-
-    # Prompt requires a TTY; in CI / pipes / GUI launchers, skip silently.
-    if not sys.stdin.isatty():
+        _dbg("change-token matches cache; nothing to do")
         return
 
-    remote_tag = release.get("tag_name") or _ZUV_UPDATE_TAG  # noqa: F821
+    # Auto-accept mode for headless / scripted invocations.
+    auto = bool(os.environ.get("ZUV_AUTO_UPDATE"))
+    # Otherwise, prompt requires a TTY; in CI / pipes / GUI launchers, skip silently.
+    if not auto and not sys.stdin.isatty():
+        _dbg("non-TTY and ZUV_AUTO_UPDATE not set; skipping update")
+        return
+
     version_line = (
         f" ({_ZUV_APP_VERSION} -> {remote_tag})"  # noqa: F821
-        if _ZUV_APP_VERSION else f" (release {remote_tag})"  # noqa: F821
+        if _ZUV_APP_VERSION else f" (release {remote_tag})"
     )
     print(
         f"zuv: update available for {provider}:{_ZUV_UPDATE_REPO}{version_line}",  # noqa: F821
         file=sys.stderr,
     )
-    try:
-        answer = input("zuv: install latest version? [Y/n] ").strip().lower()
-    except (EOFError, KeyboardInterrupt):
-        return
+    if auto:
+        print("zuv: ZUV_AUTO_UPDATE=1 -> accepting", file=sys.stderr)
+        answer = "y"
+    else:
+        try:
+            answer = input("zuv: install latest version? [Y/n] ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            _dbg("input cancelled")
+            return
 
     try:
         cache_root.mkdir(parents=True, exist_ok=True)
@@ -211,7 +234,7 @@ def _check_update(script: Path, cache_root: Path) -> None:
         pass
 
     if answer not in ("", "y", "yes"):
-        # Remember the declined version so we don't re-prompt until newer.
+        _dbg("declined; writing change_token to cache to avoid re-prompt")
         try:
             sha_cache.write_text(change_token, encoding="ascii")
         except OSError:
@@ -226,6 +249,7 @@ def _check_update(script: Path, cache_root: Path) -> None:
             shutil.copyfileobj(resp, f)
         os.replace(tmp, script)
         sha_cache.write_text(change_token, encoding="ascii")
+        _dbg(f"replaced {script.name} and wrote new known-token {change_token!r}")
     except (urllib.error.URLError, OSError, TimeoutError) as e:
         print(f"zuv: update failed ({e}); continuing with current version", file=sys.stderr)
         try:
@@ -236,8 +260,26 @@ def _check_update(script: Path, cache_root: Path) -> None:
 
     # Re-exec the new bundle. On Windows os.execvp has flaky parent-process
     # behaviour; subprocess + exit is reliable everywhere.
+    print(f"zuv: re-exec via `uv run {script.name}`", file=sys.stderr, flush=True)
     rc = subprocess.call(["uv", "run", str(script), *sys.argv[1:]])
     sys.exit(rc)
+
+
+def _check_update(script: Path, cache_root: Path) -> None:
+    """Catch-all wrapper for the update check. Quietly swallows any
+    unexpected error so a broken update path never blocks the app. Set
+    ZUV_DEBUG=1 to see what happened (and ZUV_AUTO_UPDATE=1 to skip the
+    interactive prompt — for testing / CI / scripted deploys).
+    """
+    try:
+        _check_update_inner(script, cache_root)
+    except SystemExit:
+        raise  # re-exec path; let it through
+    except Exception as e:
+        _dbg(f"unexpected error in update check: {type(e).__name__}: {e}")
+        if _DEBUG:
+            import traceback
+            traceback.print_exc(file=sys.stderr)
 
 
 def _run():
