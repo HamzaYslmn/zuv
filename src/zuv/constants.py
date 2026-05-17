@@ -26,3 +26,11 @@ LOADER_END = "# === END ZUV_LOADER ===\n"
 
 READY_SENTINEL = ".zuv-ready"
 DEFAULT_MAX_EXTRACT_BYTES = 2 * 1024 * 1024 * 1024  # 2 GiB
+
+# Directories/files never included in a bundle's tarball payload.
+SKIP_NAMES = frozenset({
+    ".venv", ".zuv", "dist", "build", "__pycache__",
+    "node_modules", ".git", ".idea", ".vscode",
+    ".mypy_cache", ".ruff_cache", ".pytest_cache",
+    ".tox", ".nox", "htmlcov", ".DS_Store", "Thumbs.db",
+})

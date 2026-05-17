@@ -5,8 +5,10 @@ import sys
 from pathlib import Path
 
 from . import __version__
-from .builder import build_pyz, clean_caches
 from .constants import WHEEL_PLATFORMS
+from .inspector import inspect
+from .modules.build import build_pyz
+from .modules.cache import clean_caches
 
 
 def _host_platform() -> str | None:
@@ -20,7 +22,6 @@ def _host_platform() -> str | None:
     if sysname == "Darwin":
         return "macos-arm" if is_arm else "macos"
     return None
-from .inspector import inspect
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -62,6 +63,17 @@ def main(argv: list[str] | None = None) -> int:
             "Tell the loader to skip the on-first-run .py->.pyc compile step. "
             "The extracted cache stays as plain .py sources (no __pycache__/). "
             "Slower per-import startup; useful when bytecode files are undesired."
+        ),
+    )
+    build.add_argument(
+        "--zip",
+        dest="make_zip",
+        action="store_true",
+        help=(
+            "Package the .py bundle into a .zip alongside run.bat and run.sh "
+            "launchers. The launchers auto-install uv if missing, then run the "
+            "bundle. Recipient extracts the zip and double-clicks run.bat "
+            "(Windows) or ./run.sh (Unix/macOS) -- no Python or uv needed first."
         ),
     )
     build.add_argument(
@@ -123,12 +135,15 @@ def main(argv: list[str] | None = None) -> int:
                     )
                     return 2
         project_dir = Path(args.project).expanduser().resolve()
+        default_suffix = ".zip" if args.make_zip else ".py"
         if args.output is None:
-            output = Path.cwd() / "dist" / f"{project_dir.name}.py"
+            output = Path.cwd() / "dist" / f"{project_dir.name}{default_suffix}"
         else:
             output = Path(args.output).expanduser().resolve()
-        if output.suffix == "":
-            output = output.with_suffix(".py")
+            if output.suffix == "":
+                output = output.with_suffix(default_suffix)
+            elif args.make_zip and output.suffix != ".zip":
+                output = output.with_suffix(".zip")
         return build_pyz(
             project_dir=project_dir,
             output=output,
@@ -136,6 +151,7 @@ def main(argv: list[str] | None = None) -> int:
             clean=args.clean,
             embed_deps=deps_platforms,
             no_compile=args.no_compile,
+            make_zip=args.make_zip,
         )
 
     if args.command == "inspect":

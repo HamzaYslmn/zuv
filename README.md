@@ -73,6 +73,27 @@ zuv run dist/my-app.py -- --any --args --you --like
 
 The shebang + PEP 723 header makes `uv run` the canonical entrypoint; `zuv run` is a thin wrapper for users who don't want to remember which tool to invoke. First run: uv extracts the bundle, creates `dist/.zuv/<name>_<hash>/.venv`, installs deps, runs your entry. Subsequent runs go straight to executing.
 
+## Double-click bundles (`--zip`)
+
+For recipients who don't have `uv` (or even Python) yet:
+
+```sh
+zuv build --zip
+# -> ./dist/<project-name>.zip
+```
+
+The zip contains three files:
+
+```
+my-app.py    the same single-file bundle a non-zip build produces
+run.bat      Windows launcher: installs uv if missing, then runs my-app.py
+run.sh       Unix/macOS launcher: same, with curl
+```
+
+The recipient extracts the zip and **double-clicks `run.bat`** (Windows) or runs **`./run.sh`** (Unix/macOS). The launcher detects whether `uv` is on PATH; if not, it runs Astral's official installer (which brings its own Python), prepends `~/.local/bin` to PATH, then `uv run`s the bundled `.py`. After that, they can run `my-app.py` directly forever.
+
+The inner `.py` is byte-for-byte the same single-file bundle you'd get without `--zip` — the launchers are just a bootstrap convenience for fresh machines.
+
 ## Offline bundles (`--deps`)
 
 Ship your app to machines with **no internet**. zuv embeds the wheels for your locked dependencies so the recipient runs it without ever hitting PyPI.
