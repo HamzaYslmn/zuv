@@ -19,7 +19,6 @@ Globals injected by the builder above this code:
   _ZUV_UPDATE_FILE:     str  asset filename inside the release
 """
 import base64
-import compileall
 import hashlib
 import io
 import os
@@ -293,18 +292,22 @@ def _run():
             shutil.rmtree(cache, ignore_errors=True)
             tmp.rename(cache)
 
-        # Pre-compile .py -> .pyc for the target Python so imports skip the
-        # source-compile step on every run. Quiet, best-effort: a syntax error
-        # in user code shouldn't block the run (uv will surface it on import).
+        # Compile .py -> .pyc using the venv's Python (the one uv will run
+        # the entry with), so bytecode always matches the runtime interpreter
+        # and is portable across builders. This is also the first `uv run` of
+        # the cache, so it creates the venv + installs deps as a side effect.
+        # Best-effort: any error here is reported but doesn't block the run.
         if not _ZUV_NO_COMPILE:  # noqa: F821
             try:
-                compileall.compile_dir(
-                    str(cache),
-                    quiet=1,
-                    force=False,
-                    legacy=False,
-                    workers=1,
+                rc = subprocess.call(
+                    ["uv", "run", "--project", str(cache),
+                     "python", "-m", "compileall", "-q", str(cache)],
+                    cwd=str(cache),
                 )
+                if rc != 0:
+                    print(f"zuv: warning: bytecode pre-compile exited {rc}", file=sys.stderr)
+            except FileNotFoundError:
+                pass  # uv missing; subprocess.call below will surface the same error
             except Exception as e:
                 print(f"zuv: warning: bytecode pre-compile skipped: {e}", file=sys.stderr)
 

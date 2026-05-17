@@ -56,14 +56,26 @@ def build_pyz(
     print(f"python:  {requires_python or '(unspecified)'}")
     if update is not None:
         print(f"updates: {describe_update(update)}")
-    print("shipping .py sources; loader will compile to .pyc on first run")
 
     stage_root: Path | None = None
     has_wheels = False
     try:
+        # Always ship .py sources. The loader compiles to .pyc on first run
+        # using the venv's Python (the one uv will provision based on PEP 723),
+        # so bytecode always matches the interpreter that runs it. --no-compile
+        # tells the loader to skip even that step.
         if embed_deps is not None:
             tar_root = cache.stage_copy(project_dir)
             stage_root = tar_root.parent
+        else:
+            tar_root = project_dir
+        print(
+            "shipping .py sources; loader will compile in venv on first run"
+            if not no_compile
+            else "shipping .py sources; loader will NOT compile (--no-compile)"
+        )
+
+        if embed_deps is not None:
             print(f"embedding wheels for: {', '.join(embed_deps)}")
             count = wheels.download_wheels(
                 project_dir, tar_root / WHEELS_DIRNAME, embed_deps
@@ -74,8 +86,6 @@ def build_pyz(
                 return 2
             has_wheels = True
             print(f"  staged {count} wheel files")
-        else:
-            tar_root = project_dir
 
         text, payload_size = pack.emit(
             tar_root, resolved_entry, requires_python,
