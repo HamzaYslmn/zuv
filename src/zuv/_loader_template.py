@@ -298,11 +298,14 @@ def _run():
         # the cache, so it creates the venv + installs deps as a side effect.
         # Best-effort: any error here is reported but doesn't block the run.
         if not _ZUV_NO_COMPILE:  # noqa: F821
+            # Strip parent venv vars so uv doesn't print the
+            # "VIRTUAL_ENV does not match the project environment" warning.
+            _env = {k: v for k, v in os.environ.items() if k not in _DROP_ENV}
             try:
                 rc = subprocess.call(
                     ["uv", "run", "--project", str(cache),
                      "python", "-m", "compileall", "-q", str(cache)],
-                    cwd=str(cache),
+                    cwd=str(cache), env=_env,
                 )
                 if rc != 0:
                     print(f"zuv: warning: bytecode pre-compile exited {rc}", file=sys.stderr)
