@@ -23,7 +23,6 @@ import base64
 import compileall
 import hashlib
 import io
-import json
 import os
 import shutil
 import subprocess
@@ -82,59 +81,23 @@ def _extract(payload: bytes, dst: Path) -> None:
         tf.extractall(dst, filter="data")
 
 
-def _release_url(repo: str, tag: str, provider: str) -> str:
-    """URL of the release metadata endpoint. `tag == 'latest'` is special on
-    both providers — it returns the most recently published release."""
+def _asset_url(repo: str, tag: str, file: str, provider: str) -> str:
+    """CDN-served direct download URL for a release asset. Used for both the
+    cheap HEAD freshness check and the GET download — both go through the
+    asset CDN, not the API, so no 60/hr unauthenticated rate limit applies.
+    """
     if provider == "gitlab":
         proj = urllib.parse.quote(repo, safe="")
+        path = urllib.parse.quote(file, safe="")
         if tag == "latest":
-            return f"https://gitlab.com/api/v4/projects/{proj}/releases/permalink/latest"
-        return f"https://gitlab.com/api/v4/projects/{proj}/releases/{urllib.parse.quote(tag, safe='')}"
+            return f"https://gitlab.com/api/v4/projects/{proj}/releases/permalink/latest/downloads/{path}"
+        return (
+            f"https://gitlab.com/api/v4/projects/{proj}/releases/"
+            f"{urllib.parse.quote(tag, safe='')}/downloads/{path}"
+        )
     if tag == "latest":
-        return f"https://api.github.com/repos/{repo}/releases/latest"
-    return f"https://api.github.com/repos/{repo}/releases/tags/{urllib.parse.quote(tag, safe='')}"
-
-
-def _find_asset(release: dict, file: str, provider: str) -> tuple[str, str]:
-    """Return (download_url, change_token) for the named asset in the release,
-    or ('', '') if not found. `change_token` is the value we compare across
-    runs to decide whether the asset is new:
-      - GitHub: asset 'id' (changes whenever `--clobber` re-uploads)
-      - GitLab: release 'released_at' (per-asset change isn't exposed)
-    """
-    if provider == "gitlab":
-        for link in (release.get("assets") or {}).get("links") or []:
-            if (link.get("name") or "") == file:
-                return link.get("direct_asset_url") or link.get("url") or "", \
-                       str(release.get("released_at") or "")
-        return "", ""
-    for asset in release.get("assets") or []:
-        if (asset.get("name") or "") == file:
-            return asset.get("browser_download_url") or "", str(asset.get("id") or "")
-    return "", ""
-
-
-def _newer_version(remote: str, local: str) -> bool | None:
-    """Return True if `remote` is a strictly newer dotted-int version than
-    `local`, False if not, or None if either side doesn't parse cleanly
-    (e.g. rolling tags like "latest"). Strips one leading 'v'.
-    """
-    if not remote or not local:
-        return None
-
-    def _parse(s: str):
-        if s.startswith("v"):
-            s = s[1:]
-        try:
-            return tuple(int(p) for p in s.split("."))
-        except ValueError:
-            return None
-
-    r, l = _parse(remote), _parse(local)
-    if r is None or l is None:
-        return None
-    n = max(len(r), len(l))
-    return r + (0,) * (n - len(r)) > l + (0,) * (n - len(l))
+        return f"https://github.com/{repo}/releases/latest/download/{file}"
+    return f"https://github.com/{repo}/releases/download/{tag}/{file}"
 
 
 def _auth_headers(provider: str) -> dict:
@@ -155,7 +118,7 @@ def _auth_headers(provider: str) -> dict:
 
 def _check_update_inner(script: Path, cache_root: Path) -> None:
     """Implementation of the update check. Raises on any non-network error;
-    the outer wrapper catches everything to keep production silent."""
+    the outer wrapper catches everything to keep the app non-blocking."""
     if not _ZUV_UPDATE_REPO or not _ZUV_UPDATE_FILE:  # noqa: F821
         _dbg("update disabled (no _ZUV_UPDATE_REPO or _ZUV_UPDATE_FILE)")
         return
@@ -164,34 +127,34 @@ def _check_update_inner(script: Path, cache_root: Path) -> None:
         return
 
     provider = _ZUV_UPDATE_PROVIDER  # noqa: F821
-    api = _release_url(_ZUV_UPDATE_REPO, _ZUV_UPDATE_TAG, provider)  # noqa: F821
+    url = _asset_url(_ZUV_UPDATE_REPO, _ZUV_UPDATE_TAG, _ZUV_UPDATE_FILE, provider)  # noqa: F821
     headers = _auth_headers(provider)
-    _dbg(f"GET {api}")
+
+    # Use HEAD on the CDN-served asset URL (not the API) for change detection.
+    # The CDN isn't subject to the 60/hr unauthenticated API rate limit, so
+    # public-repo updates work without any token. ETag changes whenever the
+    # asset bytes change (i.e. when --clobber re-uploads).
+    _dbg(f"HEAD {url}")
     try:
-        req = urllib.request.Request(api, headers=headers)
+        req = urllib.request.Request(url, headers=headers, method="HEAD")
         with urllib.request.urlopen(req, timeout=5) as resp:
-            release = json.loads(resp.read().decode("utf-8"))
+            change_token = (
+                resp.headers.get("ETag")
+                or resp.headers.get("Last-Modified")
+                or ""
+            )
     except (urllib.error.URLError, OSError, ValueError, TimeoutError) as e:
-        _dbg(f"release API call failed: {e!r}")
+        # User asked for explicit visibility of errors and an explicit fallback.
+        print(
+            f"zuv: update check skipped ({e}); running local version.",
+            file=sys.stderr,
+        )
         return
 
-    remote_tag = release.get("tag_name") or ""
-    _dbg(f"release tag_name={remote_tag!r}, local _ZUV_APP_VERSION={_ZUV_APP_VERSION!r}")  # noqa: F821
-
-    # Version check short-circuits when both sides parse: skip if local >= remote.
-    # When the remote tag isn't a version (e.g. "latest") or no version was
-    # baked at build time, this falls through to change-token comparison below.
-    newer = _newer_version(remote_tag, _ZUV_APP_VERSION)  # noqa: F821
-    if newer is False:
-        _dbg("local version >= remote; skipping")
+    if not change_token:
+        _dbg("HEAD response has no ETag/Last-Modified; cannot detect changes")
         return
-    _dbg(f"version-check result: newer={newer!r} (None = fall through to change-token)")
-
-    download_url, change_token = _find_asset(release, _ZUV_UPDATE_FILE, provider)  # noqa: F821
-    if not download_url or not change_token:
-        _dbg(f"asset not found in release (looking for {_ZUV_UPDATE_FILE!r})")  # noqa: F821
-        return
-    _dbg(f"asset found: change_token={change_token!r}, download_url={download_url}")
+    _dbg(f"change_token={change_token!r}")
 
     sha_cache = cache_root / _UPDATE_SHA_FILE
     try:
@@ -211,11 +174,12 @@ def _check_update_inner(script: Path, cache_root: Path) -> None:
         return
 
     version_line = (
-        f" ({_ZUV_APP_VERSION} -> {remote_tag})"  # noqa: F821
-        if _ZUV_APP_VERSION else f" (release {remote_tag})"
+        f" (current local version: {_ZUV_APP_VERSION})"  # noqa: F821
+        if _ZUV_APP_VERSION else ""
     )
     print(
-        f"zuv: update available for {provider}:{_ZUV_UPDATE_REPO}{version_line}",  # noqa: F821
+        f"zuv: update available for {provider}:{_ZUV_UPDATE_REPO}"  # noqa: F821
+        f" (release {_ZUV_UPDATE_TAG}, asset {_ZUV_UPDATE_FILE}){version_line}",  # noqa: F821
         file=sys.stderr,
     )
     if auto:
@@ -244,14 +208,18 @@ def _check_update_inner(script: Path, cache_root: Path) -> None:
     print("zuv: downloading...", file=sys.stderr, flush=True)
     tmp = script.with_name(script.name + ".tmp")
     try:
-        req = urllib.request.Request(download_url, headers=headers)
+        # GET the same CDN URL we HEAD'd above.
+        req = urllib.request.Request(url, headers=headers)
         with urllib.request.urlopen(req, timeout=60) as resp, open(tmp, "wb") as f:
             shutil.copyfileobj(resp, f)
         os.replace(tmp, script)
         sha_cache.write_text(change_token, encoding="ascii")
         _dbg(f"replaced {script.name} and wrote new known-token {change_token!r}")
     except (urllib.error.URLError, OSError, TimeoutError) as e:
-        print(f"zuv: update failed ({e}); continuing with current version", file=sys.stderr)
+        print(
+            f"zuv: download failed ({e}); running local version.",
+            file=sys.stderr,
+        )
         try:
             tmp.unlink(missing_ok=True)
         except OSError:
