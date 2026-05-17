@@ -303,7 +303,7 @@ def _run():
                     quiet=1,
                     force=False,
                     legacy=False,
-                    workers=0,
+                    workers=1,
                 )
             except Exception as e:
                 print(f"zuv: warning: bytecode pre-compile skipped: {e}", file=sys.stderr)
