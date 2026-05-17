@@ -48,7 +48,11 @@ jobs:
           name='${{ steps.parse.outputs.name }}'
           # Convention: source lives at examples/<name>/. Adjust to match
           # your layout (e.g. apps/<name>/ or just <name>/).
-          zuv build "examples/$name" -o "dist/$name.zuv.py"
+          # $GITHUB_REPOSITORY = "owner/repo"; pointing the bundle at its own
+          # home so recipients auto-fetch future builds from this release.
+          zuv build "examples/$name" \
+            -o "dist/$name.zuv.py" \
+            --update-repo "$GITHUB_REPOSITORY"
 
       - name: upload to `latest` release
         env:
@@ -58,7 +62,7 @@ jobs:
           set -e
           # Create the rolling `latest` release if it doesn't exist yet.
           gh release view latest >/dev/null 2>&1 || gh release create latest \
-            --title "Latest builds" \
+            --title "latest" \
             --notes "Rolling builds of zuv bundles. Re-uploaded on each \`release <name>\` commit." \
             --latest
           # Replace the existing asset of the same name (or add it).
