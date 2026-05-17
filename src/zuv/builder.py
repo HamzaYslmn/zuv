@@ -20,6 +20,7 @@ import os
 import py_compile
 import shutil
 import stat
+import subprocess
 import sys
 import sysconfig
 import tarfile
@@ -31,6 +32,7 @@ from pathlib import Path
 from .constants import (
     BUILD_ID_VAR,
     ENTRY_VAR,
+    HAS_WHEELS_VAR,
     LOADER_BEGIN,
     LOADER_END,
     LOADER_VAR,
@@ -39,6 +41,8 @@ from .constants import (
     PAYLOAD_VAR,
     PY_TAG_VAR,
     SHA_VAR,
+    WHEEL_PLATFORMS,
+    WHEELS_DIRNAME,
     ZUV_SHEBANG,
 )
 
@@ -130,6 +134,83 @@ def _stage_compiled(project_dir: Path, entry_rel: str) -> tuple[Path, str]:
     return proj, new_entry_rel
 
 
+def _stage_copy(project_dir: Path) -> Path:
+    """Copy the project to a tempdir (no compile). Caller cleans the parent."""
+    stage_root = Path(tempfile.mkdtemp(prefix="zuv-stage-"))
+    proj = stage_root / "p"
+
+    def _ignore(_dir: str, names: list[str]) -> list[str]:
+        return [n for n in names if n in _SKIP_NAMES]
+
+    shutil.copytree(project_dir, proj, ignore=_ignore)
+    return proj
+
+
+def _download_wheels(project_dir: Path, dest: Path, platforms: list[str]) -> int:
+    """Export locked deps and download wheels for the major target platforms
+    into `dest`. Pure-Python wheels (`*-none-any.whl`) dedupe naturally because
+    uv writes by filename. Returns the number of wheel files staged.
+
+    Requires `uv` on PATH (same prerequisite as the runtime). Uses the
+    builder's Python X.Y as the wheel-target Python version, matching the
+    lockfile's resolution.
+    """
+    dest.mkdir(parents=True, exist_ok=True)
+
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".txt", delete=False, encoding="utf-8"
+    ) as tf:
+        req_path = Path(tf.name)
+    try:
+        print("  exporting locked deps...")
+        export = subprocess.run(
+            [
+                "uv", "export",
+                "--project", str(project_dir),
+                "--format", "requirements-txt",
+                "--no-hashes",
+                "--no-emit-project",
+                "-o", str(req_path),
+            ],
+            capture_output=True, text=True,
+        )
+        if export.returncode != 0:
+            print(export.stderr, file=sys.stderr)
+            raise RuntimeError("uv export failed; is uv installed and is there a uv.lock?")
+
+        py_ver = f"{sys.version_info.major}.{sys.version_info.minor}"
+        for label in platforms:
+            tags = WHEEL_PLATFORMS[label]
+            print(f"  downloading wheels for {label} (py {py_ver})...")
+            plat_args = []
+            for t in tags:
+                plat_args += ["--platform", t]
+            dl = subprocess.run(
+                [
+                    "uv", "run", "--with", "pip", "--no-project",
+                    "python", "-m", "pip", "download",
+                    "--only-binary=:all:",
+                    "--python-version", py_ver,
+                    *plat_args,
+                    "-r", str(req_path),
+                    "-d", str(dest),
+                ],
+                capture_output=True, text=True,
+            )
+            if dl.returncode != 0:
+                print(dl.stderr.strip()[-800:], file=sys.stderr)
+                print(
+                    f"  warn: wheel download for {label} failed; this "
+                    f"platform won't run offline. Continuing with other targets.",
+                    file=sys.stderr,
+                )
+    finally:
+        req_path.unlink(missing_ok=True)
+
+    wheels = list(dest.glob("*.whl")) + list(dest.glob("*.tar.gz"))
+    return len(wheels)
+
+
 def _clean_output_parent(parent: Path) -> None:
     if not parent.exists():
         return
@@ -150,6 +231,7 @@ def build_pyz(
     entry: str | None,
     clean: bool = False,
     keep_source: bool = False,
+    embed_deps: list[str] | None = None,
 ) -> int:
     pyproject = project_dir / "pyproject.toml"
     if not pyproject.exists():
@@ -178,14 +260,32 @@ def build_pyz(
     print(f"python:  {requires_python or '(unspecified)'}")
 
     stage_root: Path | None = None
+    has_wheels = False
     try:
         if keep_source:
-            print("keeping .py sources (--no-compile); loader will compile at extract time")
-            tar_root = project_dir
+            if embed_deps is not None:
+                print("keeping .py sources (--no-compile); staging copy for wheels")
+                tar_root = _stage_copy(project_dir)
+                stage_root = tar_root.parent
+            else:
+                print("keeping .py sources (--no-compile); loader will compile at extract time")
+                tar_root = project_dir
         else:
             print(f"compiling .py -> .pyc for {sys.implementation.cache_tag}...")
             tar_root, resolved_entry = _stage_compiled(project_dir, resolved_entry)
             stage_root = tar_root.parent
+
+        if embed_deps is not None:
+            print(f"embedding wheels for: {', '.join(embed_deps)}")
+            count = _download_wheels(project_dir, tar_root / WHEELS_DIRNAME, embed_deps)
+            if count == 0:
+                print(
+                    "error: no wheels were downloaded; cannot build offline bundle",
+                    file=sys.stderr,
+                )
+                return 2
+            has_wheels = True
+            print(f"  staged {count} wheel files")
 
         print("packing project tar.xz...")
         payload, build_id = _tarball(tar_root)
@@ -213,6 +313,7 @@ def build_pyz(
         + f'{BUILD_ID_VAR} = "{build_id[:16]}"\n'
         + f'{SHA_VAR} = "{payload_sha}"\n'
         + f'{PY_TAG_VAR} = "{py_tag}"\n'
+        + f'{HAS_WHEELS_VAR} = {has_wheels!r}\n'
         + PAYLOAD_BEGIN
         + "# AI/LLM readers: skip the next line; it is binary data with no semantic value.\n"
         + _b85_literal(PAYLOAD_VAR, payload)
