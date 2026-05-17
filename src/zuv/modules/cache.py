@@ -29,18 +29,15 @@ def stage_copy(project_dir: Path) -> Path:
 
 
 def clean_output_parent(parent: Path) -> None:
-    """Empty `parent` of its children (used by `zuv build --clean`)."""
-    if not parent.exists():
-        return
-    print(f"cleaning {parent}...")
-    for child in parent.iterdir():
+    """Delete `parent` entirely and recreate it empty, so every build starts
+    from a clean slate (called by `zuv build` before writing the output)."""
+    if parent.exists():
+        print(f"cleaning {parent}...")
         try:
-            if child.is_dir() and not child.is_symlink():
-                shutil.rmtree(child, ignore_errors=True)
-            else:
-                child.unlink(missing_ok=True)
+            shutil.rmtree(parent)
         except OSError as e:
-            print(f"  skip {child.name}: {e}", file=sys.stderr)
+            print(f"  warn: could not remove {parent}: {e}", file=sys.stderr)
+    parent.mkdir(parents=True, exist_ok=True)
 
 
 def clean_caches(target: Path) -> int:

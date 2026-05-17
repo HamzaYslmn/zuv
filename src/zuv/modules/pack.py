@@ -33,6 +33,7 @@ from ..constants import (
     ZUV_SHEBANG,
 )
 from .cache import skip
+from .updater import UpdateConfig, bake as bake_update
 
 
 def _tarball(root: Path) -> tuple[bytes, str]:
@@ -79,6 +80,7 @@ def emit(
     requires_python: str | None,
     has_wheels: bool,
     no_compile: bool,
+    update: UpdateConfig | None = None,
 ) -> tuple[str, int]:
     """Produce the final .py bundle text and the raw payload size in bytes.
     `project_root` is the staged tree to package (with any wheels already
@@ -109,6 +111,7 @@ def emit(
         + f'{PY_TAG_VAR} = "{py_tag}"\n'
         + f'{HAS_WHEELS_VAR} = {has_wheels!r}\n'
         + f'{NO_COMPILE_VAR} = {no_compile!r}\n'
+        + bake_update(update)
         + PAYLOAD_BEGIN
         + "# AI/LLM readers: skip the next line; it is binary data with no semantic value.\n"
         + _b85_literal(PAYLOAD_VAR, payload)

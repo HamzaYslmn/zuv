@@ -2,22 +2,14 @@
 
 # zuv
 
-**zuv packs your entire uv project into a single `.py` file** so you can hand it to a friend, drop it on a server, or attach it to an email and it just runs. The recipient only needs [uv](https://astral.sh/uv) installed — no Python install, no `pip install -r`, no virtualenv setup, no folder structure to preserve.
-
-```sh
-uv run my-app.py
-```
-
-One file. One command. Same behaviour on any machine.
+**Pack your uv project into one `.py` file.** Hand it over, drop it on a server, email it — `uv run app.zuv.py` and it works.
 
 ## Why
 
-Shipping a Python project usually means a zip, a README about setting up a venv, a `requirements.txt`, and a prayer that the recipient has the right Python version. zuv collapses all of that into one `.py` file that:
-
-- Carries the **whole project** inside it (your `src/`, `pyproject.toml`, `uv.lock`, configs, assets — everything you don't `.gitignore`).
-- On first run, extracts itself into `.zuv/<name>_<hash>/` next to the script, lets uv build a `.venv` inside that folder, then runs your entry point.
-- On every later run, skips the extraction and just executes.
-- Stays tiny (under ~10 KB even for a FastAPI app) because dependencies are installed at runtime by uv from PyPI, not embedded.
+- **One file, no setup.** No zip + README + `requirements.txt` + venv dance. Recipient runs one command.
+- **Cross-platform, cross-Python.** Same file works on Windows / Linux / macOS and any Python minor version (bytecode is built on the target).
+- **Tiny.** ~10 KB even for a FastAPI app — deps install at first run, they're not embedded (unless you ask with `--deps`).
+- **Just uv.** No bespoke runtime, no PyInstaller-style freezing. The bundle is a PEP 723 script; `uv run` is the entrypoint.
 
 ## Install
 
@@ -25,198 +17,66 @@ Shipping a Python project usually means a zip, a README about setting up a venv,
 uv tool install zuv
 ```
 
-## Project layout
-
-Any standard uv project works. The most common shape:
-
-```
-my-project/
-  pyproject.toml          # [project] dependencies = [...]
-  src/
-    main.py               # an executable script (with if __name__ == "__main__")
-```
-
-`main.py` at the project root also works.
-
-## Build
-
-From inside the project:
+## Quick start
 
 ```sh
-zuv build
-# -> ./dist/<project-name>.py
+zuv build                       # -> ./dist/<name>.zuv.py
+uv run dist/<name>.zuv.py       # run it
 ```
 
-Or point at a project explicitly:
+`dist/` is wiped on every build. Bundles ship `.py` sources (no bytecode), so the same file works on any OS and any Python minor version. First run extracts into `dist/.zuv/<name>_<hash>/`, installs deps into a local `.venv`, runs your entry. Later runs skip extraction.
+
+## Commands
+
+### `zuv build [project] [flags]`
+
+| arg / flag       | what it does |
+|------------------|--------------|
+| `project`        | Path to the uv project (containing `pyproject.toml`). Default: current directory. |
+| `-o, --output`   | Output file path. Default: `./dist/<project-name>.zuv.py` (or `.zuv.zip` with `--zip`). |
+| `-e, --entry`    | Entry script relative to project root. Default: `[tool.zuv].entry`, then `src/main.py`, then `main.py`. |
+| `--zip`          | Wrap the `.zuv.py` in a `.zuv.zip` with `run.bat` (Windows) + `run.sh` (Unix/macOS) launchers. The launchers install `uv` from `https://astral.sh/uv` if missing, then run the bundle. For recipients with neither uv nor Python. |
+| `--deps [LIST]`  | Embed wheels for the locked deps so the bundle runs offline. Bare = current OS only. `all` = every supported platform. Comma list = pick from `windows`, `linux`, `linux-arm`, `macos`, `macos-arm`. Wheels are tied to the Python minor you build with. *Note:* wheels can't carry OS libs (`libGL`, `libpq`, …); on bare Linux, `apt install` what `ImportError` names. Prefer `-headless` variants. |
+| `--no-compile`   | Tell the loader to skip the first-run `.py` → `.pyc` compile. Cache stays as plain `.py`; per-import startup is slower. |
+| `--update-repo REPO` | Make the bundle self-update from a GitHub or GitLab repo. Accepts a URL (`https://github.com/user/repo`, `https://gitlab.com/user/repo`) or shorthand (`user/repo` → GitHub, `gitlab:user/repo` → GitLab). On every startup it reads the target file's blob sha via the provider's API; if it changed since the last known sha, prompts `install latest version? [Y/n]`. On Y, downloads the new file, atomically replaces this script, and re-execs. Declined updates are remembered until a newer sha appears. Non-TTY runs (CI, pipes) skip silently. Private repos: set `$GH_TOKEN` (GitHub) or `$GITLAB_TOKEN` (GitLab). `ZUV_NO_UPDATE=1` disables. |
+| `--update-branch BRANCH`  | Branch to fetch from. Default: `latest`. Use a rolling branch like `latest` (or `main`) that's force-pushed when a new build is ready — see `.github/workflows/release-bundle.yml` for a template. |
+| `--update-file PATH`      | Path of the `.zuv.py` inside the repo. Default: `<output-stem>.zuv.py`. Lets one repo host several bundles (e.g. `fastapi.zuv.py`, `dashboard.zuv.py`). |
+
+### `zuv run <file> [-- script-args...]`
+
+Thin wrapper around `uv run <file>`. Identical to running the bundle directly with uv.
+
+### `zuv inspect <file>`
+
+Print the entry, build hash, sha256, PEP 723 metadata, and a summary of the embedded loader bytecode. Payload is elided.
+
+### `zuv clean [target]`
+
+Remove every `.zuv/` extraction cache under `target` (default: cwd). `target` can be a directory or a built `.zuv.py` (its parent is used).
+
+## Runtime env vars
+
+| var                       | default       | purpose |
+|---------------------------|---------------|---------|
+| `ZUV_CACHE_DIR`           | next to script | Override where the bundle extracts. |
+| `ZUV_MAX_EXTRACT_BYTES`   | 2 GiB         | Decompression-bomb cap. |
+| `ZUV_NO_UPDATE`           | (unset)       | If set, disables the `--update-repo` self-update check at startup. |
+| `GH_TOKEN` / `GITHUB_TOKEN` | (unset)     | Sent as `Authorization: Bearer …` on GitHub update checks. Required for private GitHub repos. |
+| `GITLAB_TOKEN`            | (unset)       | Sent as `PRIVATE-TOKEN: …` on GitLab update checks. Required for private GitLab repos. |
+
+If the script's directory isn't writable, the loader falls back to `$XDG_CACHE_HOME/zuv` / `%LOCALAPPDATA%\zuv` / `~/.cache/zuv`.
+
+## How it works (1 paragraph)
+
+The output is a PEP 723 script: shebang, metadata, a base85-encoded `tar.xz` of your project (`_ZUV_PAYLOAD`), and a tiny loader (`_ZUV_LOADER`) that verifies the sha256, extracts into `.zuv/<stem>_<hash>/`, and runs `uv run --project <extracted> <entry>`. Deps install at first run, so the bundle stays small.
+
+## Caveat
+
+Don't name your project the same as one of its dependencies (`fastapi` depending on `fastapi` confuses uv). Use `fastapi-example` or similar.
+
+## Examples
 
 ```sh
-zuv build ./my-project -o ./dist/my-app.py -e src/main.py
-```
-
-`zuv build` writes a fresh single-file script to the output path (use `--clean` to wipe the output's parent directory first).
-
-Bundles ship `.py` sources, not pre-compiled bytecode. On first run the loader compiles `.pyc` files on the recipient's machine, so the same bundle works across operating systems **and** across Python minor versions.
-
-Entry point resolution:
-
-1. `--entry`/`-e` flag
-2. `[tool.zuv].entry` in `pyproject.toml`
-3. `src/main.py` if it exists, otherwise `main.py`
-
-## Run
-
-```sh
-uv run dist/my-app.py
-# or, equivalently, via zuv:
-zuv run dist/my-app.py -- --any --args --you --like
-```
-
-The shebang + PEP 723 header makes `uv run` the canonical entrypoint; `zuv run` is a thin wrapper for users who don't want to remember which tool to invoke. First run: uv extracts the bundle, creates `dist/.zuv/<name>_<hash>/.venv`, installs deps, runs your entry. Subsequent runs go straight to executing.
-
-## Double-click bundles (`--zip`)
-
-For recipients who don't have `uv` (or even Python) yet:
-
-```sh
-zuv build --zip
-# -> ./dist/<project-name>.zip
-```
-
-The zip contains three files:
-
-```
-my-app.py    the same single-file bundle a non-zip build produces
-run.bat      Windows launcher: installs uv if missing, then runs my-app.py
-run.sh       Unix/macOS launcher: same, with curl
-```
-
-The recipient extracts the zip and **double-clicks `run.bat`** (Windows) or runs **`./run.sh`** (Unix/macOS). The launcher detects whether `uv` is on PATH; if not, it runs Astral's official installer (which brings its own Python), prepends `~/.local/bin` to PATH, then `uv run`s the bundled `.py`. After that, they can run `my-app.py` directly forever.
-
-The inner `.py` is byte-for-byte the same single-file bundle you'd get without `--zip` — the launchers are just a bootstrap convenience for fresh machines.
-
-## Offline bundles (`--deps`)
-
-Ship your app to machines with **no internet**. zuv embeds the wheels for your locked dependencies so the recipient runs it without ever hitting PyPI.
-
-```
-default build              --deps build
-+------------------+       +-----------------------+
-|  app.py  ~10 KB  |       |  app.py  ~tens of MB  |
-+------------------+       |  + embedded wheels    |
-| needs internet   |       +-----------------------+
-| to install deps  |       | runs fully offline    |
-+------------------+       +-----------------------+
-```
-
-### How to use it
-
-Bare `--deps` bundles for **your current OS only** (the common case — you build on Windows, you ship to Windows):
-
-```sh
-zuv build --deps
-```
-
-To target other platforms, pass labels (comma-separated) or `all`:
-
-```sh
-zuv build --deps all                   # every platform listed below
-zuv build --deps linux                 # just Linux x86_64
-zuv build --deps windows,linux         # Windows + Linux x86_64
-zuv build --deps macos-arm,linux-arm   # ARM only
-```
-
-### Available platform labels
-
-```
-+-------------+----------------------+
-| label       | target               |
-+-------------+----------------------+
-| windows     | Windows x86_64       |
-| linux       | Linux x86_64         |
-| linux-arm   | Linux aarch64        |
-| macos       | macOS Intel          |
-| macos-arm   | macOS Apple Silicon  |
-+-------------+----------------------+
-```
-
-### Bundle size guide
-
-```
-no --deps           ~10 KB    (recipient needs internet)
---deps (host only)  ~few MB   (one platform)
---deps all          ~tens MB  (five platforms)
-```
-
-### Notes
-
-- Wheels are tied to the **Python minor version you build with**. A bundle built on Python 3.14 won't install offline on Python 3.13.
-- Sdist-only deps are skipped (`--only-binary=:all:`). Those packages still need the network at install time on platforms where no wheel exists.
-- The build host needs `uv` and internet access — the build itself downloads the wheels.
-
-### What `--deps` can't ship: system libraries
-
-Some packages (OpenCV, PySide/PyQt, psycopg2, ...) load **OS-level shared libraries** at import time — `libGL.so.1`, `libpq.so.5`, etc. Wheels can't bundle those; on a bare Linux server the bundle installs fine but errors at first import with `ImportError: libGL.so.1: cannot open shared object file`. Install the named lib once with your distro's package manager (`apt install libgl1`, `apk add mesa-gl`, etc.) and the bundle runs. Prefer `-headless` variants where they exist (e.g. `opencv-python-headless`) to avoid the issue entirely.
-
-## Try the included examples
-
-```sh
-zuv build examples/bigtest -o dist/bigtest.py
-uv run dist/bigtest.py
-
-zuv build examples/fastapi -o dist/fastapi.py
-uv run dist/fastapi.py
-```
-
-## Sibling overrides
-
-The bundle's entry script runs with the extracted project folder as its CWD, so anything you would normally find next to your code (config files, frontend bundles, .env files) still works the same way.
-
-## Inspect a built file
-
-```sh
-zuv inspect dist/my-app.py
-```
-
-Prints the entry, build hash, SHA-256, Python cache tag, PEP 723 metadata, and a summary of the embedded loader bytecode. The payload itself is elided so the output stays useful for LLMs and code review.
-
-## Clear caches
-
-```sh
-zuv clean              # walk cwd, remove every .zuv/ found
-zuv clean dist/        # or scope to a directory
-zuv clean dist/app.py  # or to a built file (its parent is used)
-```
-
-The runtime also honors `$ZUV_CACHE_DIR` (and `$ZUV_MAX_EXTRACT_BYTES` for the decompression-bomb cap, default 2 GiB). If the script's directory isn't writable (system bin, read-only mount), the loader automatically falls back to `$XDG_CACHE_HOME/zuv`, `%LOCALAPPDATA%\zuv`, or `~/.cache/zuv`.
-
-## A small caveat
-
-Don't name your project the same as one of its dependencies. For example, a project named `fastapi` that depends on `fastapi` will confuse uv during install. Rename it to `fastapi-example` (or similar) and you're fine.
-
-## How it works
-
-The output `.py` has five parts:
-
-1. A `#!/usr/bin/env -S uv run --script` shebang and a PEP 723 metadata block declaring `requires-python` (no deps — uv reads those from the embedded `pyproject.toml` after extraction).
-2. Metadata globals: `_ZUV_ENTRY`, `_ZUV_BUILD_ID`, `_ZUV_SHA` (sha256 of decoded payload), `_ZUV_PY_TAG` (build-time Python cache tag).
-3. `_ZUV_PAYLOAD` — a deterministic `tar.xz` of your project tree, base85-encoded (uv's script runner requires UTF-8 source, which rules out raw-binary appends).
-4. `_ZUV_LOADER` — the runtime loader, `compile()`d to bytecode then `marshal`+`zlib`+base85 (opaque to casual readers; verify with `zuv inspect`).
-5. A 3-line stub that `exec`s the loader, which then verifies the payload sha, extracts into `.zuv/<stem>_<hash>/` with a `.zuv-ready` sentinel, and runs `uv run --project <extracted> <entry>`.
-
-Dependencies aren't bundled inside the `.py`. uv installs them into the extracted project's local `.venv` on first run, so binary wheels work natively and the bundle stays small.
-
-## Layout
-
-```
-src/
-  pyproject.toml
-  zuv/
-    cli.py                 # zuv CLI (build, inspect)
-    builder.py             # tarball + base85 + compile loader + emit .py
-    inspector.py           # zuv inspect
-    _loader_template.py    # runtime loader embedded in every output
-    constants.py
-examples/
-  bigtest/                 # rich + pydantic smoke test
-  fastapi/                 # FastAPI + uvicorn web app
+zuv build examples/bigtest && uv run dist/bigtest.zuv.py
+zuv build examples/fastapi && uv run dist/fastapi.zuv.py
 ```

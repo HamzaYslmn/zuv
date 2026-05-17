@@ -13,22 +13,31 @@ Globals injected by the builder above this code:
   _ZUV_PY_TAG:   str   build-time sys.implementation.cache_tag
   _ZUV_HAS_WHEELS: bool  whether _zuv_wheels/ is embedded for offline install
   _ZUV_NO_COMPILE: bool  if True, skip the first-run .py->.pyc compile pass
+  _ZUV_UPDATE_PROVIDER: str  "github" or "gitlab"
+  _ZUV_UPDATE_REPO:     str  "user/repo" to self-update from (empty = disabled)
+  _ZUV_UPDATE_BRANCH:   str  branch to fetch the update file from
+  _ZUV_UPDATE_FILE:     str  path of the .zuv.py file inside the repo
 """
 import base64
 import compileall
 import hashlib
 import io
+import json
 import os
 import shutil
 import subprocess
 import sys
 import tarfile
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from pathlib import Path
 
 _DROP_ENV = ("VIRTUAL_ENV", "UV_PROJECT_ENVIRONMENT", "PYTHONHOME", "PYTHONPATH")
 _READY = ".zuv-ready"
 _MAX_BYTES = int(os.environ.get("ZUV_MAX_EXTRACT_BYTES", str(2 * 1024 * 1024 * 1024)))
+_UPDATE_SHA_FILE = ".zuv-update-known-sha"  # last sha seen (installed or declined)
 
 
 def _cache_root(script: Path) -> Path:
@@ -64,10 +73,130 @@ def _extract(payload: bytes, dst: Path) -> None:
         tf.extractall(dst, filter="data")
 
 
+def _provider_urls(repo: str, branch: str, file: str, provider: str) -> tuple[str, str, str]:
+    """Return (metadata_url, sha_field, download_url) for the given provider.
+    `download_url` for GitLab is a real URL; for GitHub it's '' (use the
+    'download_url' field on the metadata response instead)."""
+    if provider == "gitlab":
+        proj = urllib.parse.quote(repo, safe="")
+        path = urllib.parse.quote(file, safe="")
+        base = f"https://gitlab.com/api/v4/projects/{proj}/repository/files/{path}"
+        return f"{base}?ref={branch}", "blob_id", f"{base}/raw?ref={branch}"
+    api = f"https://api.github.com/repos/{repo}/contents/{file}?ref={branch}"
+    return api, "sha", ""
+
+
+def _auth_headers(provider: str) -> dict:
+    """User-Agent + appropriate auth header for the provider, if a token is
+    set in the environment. Lets private repos work with no extra plumbing."""
+    headers = {"User-Agent": "zuv-updater"}
+    if provider == "gitlab":
+        token = os.environ.get("GITLAB_TOKEN")
+        if token:
+            headers["PRIVATE-TOKEN"] = token
+    else:
+        headers["Accept"] = "application/vnd.github+json"
+        token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
+def _check_update(script: Path, cache_root: Path) -> None:
+    """If _ZUV_UPDATE_REPO is set, ask the GitHub Contents API for the file's
+    current git blob sha (one call per startup). If the sha differs from the
+    last-known one (either installed or previously declined), prompt the user
+    [Y/n]; on Y, download and atomically replace this script, then re-exec.
+
+    Silent on any failure (network, missing file, auth, non-TTY) so a broken
+    update path never blocks the app. Honors ZUV_NO_UPDATE=1 to disable.
+    """
+    if not _ZUV_UPDATE_REPO or not _ZUV_UPDATE_FILE:  # noqa: F821
+        return
+    if os.environ.get("ZUV_NO_UPDATE"):
+        return
+
+    provider = _ZUV_UPDATE_PROVIDER  # noqa: F821
+    api, sha_field, raw_url = _provider_urls(
+        _ZUV_UPDATE_REPO, _ZUV_UPDATE_BRANCH, _ZUV_UPDATE_FILE, provider,  # noqa: F821
+    )
+    headers = _auth_headers(provider)
+    try:
+        req = urllib.request.Request(api, headers=headers)
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            meta = json.loads(resp.read().decode("utf-8"))
+    except (urllib.error.URLError, OSError, ValueError, TimeoutError):
+        return
+
+    remote_sha = meta.get(sha_field) or ""
+    # GitHub embeds the download URL in the metadata response; GitLab uses a
+    # separate /raw endpoint that we built in _provider_urls.
+    download_url = raw_url or meta.get("download_url") or ""
+    if not remote_sha or not download_url:
+        return
+
+    sha_cache = cache_root / _UPDATE_SHA_FILE
+    try:
+        known_sha = sha_cache.read_text(encoding="ascii").strip()
+    except OSError:
+        known_sha = ""
+    if remote_sha == known_sha:
+        return  # already installed OR already declined this exact sha
+
+    # Prompt requires a TTY; in CI / pipes / GUI launchers, skip silently.
+    if not sys.stdin.isatty():
+        return
+
+    print(
+        f"zuv: update available for {provider}:{_ZUV_UPDATE_REPO}"  # noqa: F821
+        f"@{_ZUV_UPDATE_BRANCH}/{_ZUV_UPDATE_FILE}",  # noqa: F821
+        file=sys.stderr,
+    )
+    try:
+        answer = input("zuv: install latest version? [Y/n] ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        return
+
+    try:
+        cache_root.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+
+    if answer not in ("", "y", "yes"):
+        # Remember the declined sha so we don't re-prompt until a newer one.
+        try:
+            sha_cache.write_text(remote_sha, encoding="ascii")
+        except OSError:
+            pass
+        return
+
+    print("zuv: downloading...", file=sys.stderr, flush=True)
+    tmp = script.with_name(script.name + ".tmp")
+    try:
+        req = urllib.request.Request(download_url, headers=headers)
+        with urllib.request.urlopen(req, timeout=60) as resp, open(tmp, "wb") as f:
+            shutil.copyfileobj(resp, f)
+        os.replace(tmp, script)
+        sha_cache.write_text(remote_sha, encoding="ascii")
+    except (urllib.error.URLError, OSError, TimeoutError) as e:
+        print(f"zuv: update failed ({e}); continuing with current version", file=sys.stderr)
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return
+
+    # Re-exec the new bundle. On Windows os.execvp has flaky parent-process
+    # behaviour; subprocess + exit is reliable everywhere.
+    rc = subprocess.call(["uv", "run", str(script), *sys.argv[1:]])
+    sys.exit(rc)
+
+
 def _run():
     script = Path(sys.argv[0]).resolve()
 
     cache_root = _cache_root(script)
+    _check_update(script, cache_root)
     cache = cache_root / f"{script.stem}_{_ZUV_BUILD_ID}"  # noqa: F821
     ready = cache / _READY
 

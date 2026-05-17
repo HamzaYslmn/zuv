@@ -8,6 +8,10 @@ PY_TAG_VAR = "_ZUV_PY_TAG"
 SHA_VAR = "_ZUV_SHA"
 HAS_WHEELS_VAR = "_ZUV_HAS_WHEELS"
 NO_COMPILE_VAR = "_ZUV_NO_COMPILE"
+UPDATE_PROVIDER_VAR = "_ZUV_UPDATE_PROVIDER"
+UPDATE_REPO_VAR = "_ZUV_UPDATE_REPO"
+UPDATE_BRANCH_VAR = "_ZUV_UPDATE_BRANCH"
+UPDATE_FILE_VAR = "_ZUV_UPDATE_FILE"
 WHEELS_DIRNAME = "_zuv_wheels"
 # User-facing label -> list of pip --platform tags. Multiple tags per target
 # let pip match newer manylinux/macos variants too.

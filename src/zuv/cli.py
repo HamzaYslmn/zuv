@@ -9,6 +9,7 @@ from .constants import WHEEL_PLATFORMS
 from .inspector import inspect
 from .modules.build import build_pyz
 from .modules.cache import clean_caches
+from .modules.updater import from_cli as updater_from_cli
 
 
 def _host_platform() -> str | None:
@@ -51,11 +52,6 @@ def main(argv: list[str] | None = None) -> int:
         help="Entry script relative to project root. Default: 'src/main.py' if it exists else 'main.py', or [tool.zuv].entry.",
     )
     build.add_argument(
-        "--clean",
-        action="store_true",
-        help="Wipe the output's parent directory before building (was implicit for dist/ in <=0.0.2).",
-    )
-    build.add_argument(
         "--no-compile",
         dest="no_compile",
         action="store_true",
@@ -75,6 +71,35 @@ def main(argv: list[str] | None = None) -> int:
             "bundle. Recipient extracts the zip and double-clicks run.bat "
             "(Windows) or ./run.sh (Unix/macOS) -- no Python or uv needed first."
         ),
+    )
+    build.add_argument(
+        "--update-repo",
+        dest="update_repo",
+        default=None,
+        metavar="REPO",
+        help=(
+            "GitHub or GitLab repo hosting the rolling build of this bundle. "
+            "Accepts a full URL (https://github.com/user/repo, "
+            "https://gitlab.com/user/repo) or shorthand (user/repo for GitHub, "
+            "gitlab:user/repo for GitLab). The bundle self-updates on startup: "
+            "checks the file's sha via the provider's API and, if it changed, "
+            "prompts to download. Private repos: $GH_TOKEN (GitHub) or "
+            "$GITLAB_TOKEN (GitLab). ZUV_NO_UPDATE=1 disables."
+        ),
+    )
+    build.add_argument(
+        "--update-branch",
+        dest="update_branch",
+        default="latest",
+        metavar="BRANCH",
+        help="Branch to fetch the update from. Default: latest.",
+    )
+    build.add_argument(
+        "--update-file",
+        dest="update_file",
+        default=None,
+        metavar="PATH",
+        help="File path inside the repo. Default: <output-stem>.zuv.py.",
     )
     build.add_argument(
         "--deps",
@@ -135,7 +160,9 @@ def main(argv: list[str] | None = None) -> int:
                     )
                     return 2
         project_dir = Path(args.project).expanduser().resolve()
-        default_suffix = ".zip" if args.make_zip else ".py"
+        # .zuv.{py,zip} is zuv's own protocol-marker extension. Keeps .py
+        # last so `uv run app.zuv.py` is still recognised by uv.
+        default_suffix = ".zuv.zip" if args.make_zip else ".zuv.py"
         if args.output is None:
             output = Path.cwd() / "dist" / f"{project_dir.name}{default_suffix}"
         else:
@@ -144,14 +171,21 @@ def main(argv: list[str] | None = None) -> int:
                 output = output.with_suffix(default_suffix)
             elif args.make_zip and output.suffix != ".zip":
                 output = output.with_suffix(".zip")
+        try:
+            update = updater_from_cli(
+                args.update_repo, args.update_branch, args.update_file, output
+            )
+        except ValueError as e:
+            print(f"error: --update-repo: {e}", file=sys.stderr)
+            return 2
         return build_pyz(
             project_dir=project_dir,
             output=output,
             entry=args.entry,
-            clean=args.clean,
             embed_deps=deps_platforms,
             no_compile=args.no_compile,
             make_zip=args.make_zip,
+            update=update,
         )
 
     if args.command == "inspect":

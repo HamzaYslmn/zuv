@@ -11,6 +11,7 @@ from pathlib import Path
 
 from ..constants import WHEELS_DIRNAME
 from . import cache, pack, wheels, zip as zipmod
+from .updater import UpdateConfig, describe as describe_update
 
 
 def _resolve_entry(project_dir: Path, entry: str | None, zuv_cfg: dict) -> str | None:
@@ -26,10 +27,10 @@ def build_pyz(
     project_dir: Path,
     output: Path,
     entry: str | None,
-    clean: bool = False,
     embed_deps: list[str] | None = None,
     no_compile: bool = False,
     make_zip: bool = False,
+    update: UpdateConfig | None = None,
 ) -> int:
     pyproject = project_dir / "pyproject.toml"
     if not pyproject.exists():
@@ -45,13 +46,13 @@ def build_pyz(
         print(f"error: entry script not found in {project_dir}", file=sys.stderr)
         return 2
 
-    if clean:
-        cache.clean_output_parent(output.parent)
-    output.parent.mkdir(parents=True, exist_ok=True)
+    cache.clean_output_parent(output.parent)
 
     print(f"project: {project_dir}")
     print(f"entry:   {resolved_entry}")
     print(f"python:  {requires_python or '(unspecified)'}")
+    if update is not None:
+        print(f"updates: {describe_update(update)}")
     print("shipping .py sources; loader will compile to .pyc on first run")
 
     stage_root: Path | None = None
@@ -74,7 +75,8 @@ def build_pyz(
             tar_root = project_dir
 
         text, payload_size = pack.emit(
-            tar_root, resolved_entry, requires_python, has_wheels, no_compile
+            tar_root, resolved_entry, requires_python,
+            has_wheels, no_compile, update,
         )
     finally:
         if stage_root is not None:
