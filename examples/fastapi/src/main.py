@@ -1,9 +1,7 @@
 """FastAPI example for zuv.
 
-zuv runs this with cwd = the folder containing the .zuv file, so relative
-paths "just work":
-  - `.env`        → optional config next to the .zuv
-  - `frontend/`   → optional UI folder next to the .zuv; falls back to bundled
+All paths are anchored to this file's location, so the app behaves the same
+regardless of where it's launched from.
 """
 import os
 from contextlib import asynccontextmanager
@@ -12,9 +10,12 @@ from typing import AsyncGenerator
 
 from dotenv import load_dotenv
 
-# cwd is the .zuv directory (set by the zuv loader); falls back to "." otherwise.
-load_dotenv(".env")                          # sibling config (if present)
-load_dotenv(Path(__file__).parent / "example.env", override=False)  # bundled default
+BASE_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = BASE_DIR.parent
+DATA_DIR = PROJECT_ROOT / "data"
+
+load_dotenv(PROJECT_ROOT / ".env")
+load_dotenv(BASE_DIR / "example.env", override=False)
 
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
@@ -27,22 +28,17 @@ from api import router as api_router
 PORT = int(os.getenv("PORT", "8000"))
 HOST = os.getenv("HOST", "127.0.0.1")
 
-
-def _frontend_dir() -> Path | None:
-    sibling = Path("frontend")                     # next to the .zuv (cwd)
-    bundled = Path(__file__).parent / "frontend"   # inside the bundle
-    if sibling.is_dir():
-        return sibling.resolve()
-    if bundled.is_dir():
-        return bundled
-    return None
+FRONTEND_DIR = next(
+    (p for p in (PROJECT_ROOT / "frontend", BASE_DIR / "frontend") if p.is_dir()),
+    None,
+)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     print(f"Starting service on http://{HOST}:{PORT}")
-    print(f"  cwd      = {Path.cwd()}")
-    print(f"  frontend = {_frontend_dir() or '<none>'}")
+    print(f"  project  = {PROJECT_ROOT}")
+    print(f"  frontend = {FRONTEND_DIR or '<none>'}")
     yield
 
 
@@ -58,9 +54,8 @@ class SPAStaticFiles(StaticFiles):
             return await super().get_response("index.html", scope)
 
 
-fdir = _frontend_dir()
-if fdir is not None:
-    app.mount("/", SPAStaticFiles(directory=fdir, html=True), name="spa")
+if FRONTEND_DIR is not None:
+    app.mount("/", SPAStaticFiles(directory=FRONTEND_DIR, html=True), name="spa")
 
 
 def main() -> None:

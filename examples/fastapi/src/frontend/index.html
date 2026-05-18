@@ -14,6 +14,11 @@
     .pill { display: inline-block; padding: .15rem .55rem; border-radius: 999px; font-size: .85rem; }
     .ok { background: #d6f5d6; color: #1c5d1c; }
     .err { background: #fbd4d4; color: #7a1c1c; }
+    .switch-card { border: 1px solid #ddd; border-radius: 8px; padding: 1rem; margin: 1.5rem 0; }
+    .switch-card h2 { margin: 0 0 .5rem; font-size: 1.1rem; }
+    .switch-state { font-weight: bold; }
+    .switch-state.on { color: #1c5d1c; }
+    .switch-state.off { color: #7a1c1c; }
   </style>
 </head>
 <body>
@@ -28,6 +33,17 @@
   </div>
 
   <pre id="out">Click a button to call the API.</pre>
+
+  <div class="switch-card">
+    <h2>Persistent switch (volume demo)</h2>
+    <p>Stored in <code>data/settings.json</code> on the persistent volume. Survives version upgrades.</p>
+    <p>Current value: <span id="switchState" class="switch-state">loading...</span></p>
+    <div class="row">
+      <button id="refreshSwitch">Refresh</button>
+      <button id="toggleSwitch">Toggle</button>
+      <span id="switchStatus" class="pill"></span>
+    </div>
+  </div>
 
   <script>
     const out = document.getElementById("out");
@@ -49,6 +65,55 @@
     }
     document.getElementById("health").onclick = () => call("/api/health");
     document.getElementById("info").onclick = () => call("/api/info");
+
+    const switchState = document.getElementById("switchState");
+    const switchStatus = document.getElementById("switchStatus");
+    let currentSwitch = null;
+
+    function renderSwitch(value) {
+      currentSwitch = value;
+      switchState.textContent = value ? "ON" : "OFF";
+      switchState.className = "switch-state " + (value ? "on" : "off");
+    }
+
+    async function loadSwitch() {
+      switchStatus.textContent = "...";
+      switchStatus.className = "pill";
+      try {
+        const r = await fetch("/api/settings");
+        const data = await r.json();
+        renderSwitch(data.switch);
+        switchStatus.textContent = r.status + " OK";
+        switchStatus.className = "pill ok";
+      } catch (e) {
+        switchStatus.textContent = "error";
+        switchStatus.className = "pill err";
+      }
+    }
+
+    async function toggleSwitch() {
+      if (currentSwitch === null) { await loadSwitch(); return; }
+      switchStatus.textContent = "...";
+      switchStatus.className = "pill";
+      try {
+        const r = await fetch("/api/settings", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ switch: !currentSwitch }),
+        });
+        const data = await r.json();
+        renderSwitch(data.switch);
+        switchStatus.textContent = r.status + " OK";
+        switchStatus.className = "pill ok";
+      } catch (e) {
+        switchStatus.textContent = "error";
+        switchStatus.className = "pill err";
+      }
+    }
+
+    document.getElementById("refreshSwitch").onclick = loadSwitch;
+    document.getElementById("toggleSwitch").onclick = toggleSwitch;
+    loadSwitch();
   </script>
 </body>
 </html>

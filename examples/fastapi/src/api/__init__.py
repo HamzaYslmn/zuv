@@ -8,9 +8,13 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+BASE_DIR = Path(__file__).resolve().parent.parent
+PROJECT_ROOT = BASE_DIR.parent
+DATA_DIR = PROJECT_ROOT / "data"
+
 router = APIRouter()
 
-SETTINGS_FILE = Path("data/settings.json")
+SETTINGS_FILE = DATA_DIR / "settings.json"
 
 
 class Settings(BaseModel):
@@ -24,15 +28,14 @@ def health() -> dict:
 
 @router.get("/info")
 def info() -> dict:
-    cwd = Path.cwd()
     return {
         "python": sys.version.split()[0],
         "platform": platform.platform(),
-        "cwd": str(cwd),
+        "project_root": str(PROJECT_ROOT),
+        "base_dir": str(BASE_DIR),
+        "data_dir": str(DATA_DIR),
         "zuv_dir": os.environ.get("ZUV_DIR"),
         "zuv_cache": os.environ.get("ZUV_CACHE"),
-        "frontend_override": (cwd / "frontend").is_dir(),
-        "env_override": (cwd / ".env").is_file(),
     }
 
 
