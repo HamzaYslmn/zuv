@@ -46,73 +46,57 @@
   </div>
 
   <script>
-    const out = document.getElementById("out");
-    const status = document.getElementById("status");
-    async function call(path) {
-      status.textContent = "...";
-      status.className = "pill";
+    const $ = (id) => document.getElementById(id);
+
+    async function request(pill, path, init) {
+      pill.textContent = "...";
+      pill.className = "pill";
       try {
-        const r = await fetch(path);
+        const r = await fetch(path, init);
         const data = await r.json();
-        out.textContent = JSON.stringify(data, null, 2);
-        status.textContent = r.status + " OK";
-        status.className = "pill ok";
+        pill.textContent = r.status + " OK";
+        pill.className = "pill ok";
+        return data;
       } catch (e) {
-        out.textContent = String(e);
-        status.textContent = "error";
-        status.className = "pill err";
+        pill.textContent = "error";
+        pill.className = "pill err";
+        return { _error: String(e) };
       }
     }
-    document.getElementById("health").onclick = () => call("/api/health");
-    document.getElementById("info").onclick = () => call("/api/info");
 
-    const switchState = document.getElementById("switchState");
-    const switchStatus = document.getElementById("switchStatus");
+    const out = $("out"), status = $("status");
+    const showJson = async (path) => {
+      out.textContent = JSON.stringify(await request(status, path), null, 2);
+    };
+    $("health").onclick = () => showJson("/api/health");
+    $("info").onclick = () => showJson("/api/info");
+
+    const switchState = $("switchState"), switchStatus = $("switchStatus");
     let currentSwitch = null;
 
-    function renderSwitch(value) {
+    function render(value) {
       currentSwitch = value;
       switchState.textContent = value ? "ON" : "OFF";
       switchState.className = "switch-state " + (value ? "on" : "off");
     }
 
     async function loadSwitch() {
-      switchStatus.textContent = "...";
-      switchStatus.className = "pill";
-      try {
-        const r = await fetch("/api/settings");
-        const data = await r.json();
-        renderSwitch(data.switch);
-        switchStatus.textContent = r.status + " OK";
-        switchStatus.className = "pill ok";
-      } catch (e) {
-        switchStatus.textContent = "error";
-        switchStatus.className = "pill err";
-      }
+      const data = await request(switchStatus, "/api/settings");
+      if (!data._error) render(data.switch);
     }
 
     async function toggleSwitch() {
-      if (currentSwitch === null) { await loadSwitch(); return; }
-      switchStatus.textContent = "...";
-      switchStatus.className = "pill";
-      try {
-        const r = await fetch("/api/settings", {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ switch: !currentSwitch }),
-        });
-        const data = await r.json();
-        renderSwitch(data.switch);
-        switchStatus.textContent = r.status + " OK";
-        switchStatus.className = "pill ok";
-      } catch (e) {
-        switchStatus.textContent = "error";
-        switchStatus.className = "pill err";
-      }
+      if (currentSwitch === null) return loadSwitch();
+      const data = await request(switchStatus, "/api/settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ switch: !currentSwitch }),
+      });
+      if (!data._error) render(data.switch);
     }
 
-    document.getElementById("refreshSwitch").onclick = loadSwitch;
-    document.getElementById("toggleSwitch").onclick = toggleSwitch;
+    $("refreshSwitch").onclick = loadSwitch;
+    $("toggleSwitch").onclick = toggleSwitch;
     loadSwitch();
   </script>
 </body>

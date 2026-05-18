@@ -1,8 +1,4 @@
-"""FastAPI example for zuv.
-
-All paths are anchored to this file's location, so the app behaves the same
-regardless of where it's launched from.
-"""
+"""FastAPI example for zuv - paths anchored to this file's location."""
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
