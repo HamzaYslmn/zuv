@@ -1,11 +1,15 @@
 import argparse
 import platform
+import re
+import shutil
 import subprocess
 import sys
+import tarfile
+import time
 from pathlib import Path
 
 from . import __version__
-from .constants import WHEEL_PLATFORMS
+from .constants import VOLUME_MARKER, VOLUME_VAR, WHEEL_PLATFORMS
 from .inspector import inspect
 from .modules.build import build_pyz
 from .modules.cache import clean_caches
@@ -128,6 +132,22 @@ def main(argv: list[str] | None = None) -> int:
         default=".",
         help="Directory to walk (or a built .py — its parent is used). Default: cwd.",
     )
+    clean.add_argument(
+        "--data",
+        action="store_true",
+        help="Also wipe persistent volume directories (DESTRUCTIVE; default keeps them).",
+    )
+
+    vol = sub.add_parser("volume", help="Manage a bundle's persistent volume.")
+    vol_sub = vol.add_subparsers(dest="vol_command", required=True)
+    vol_locate = vol_sub.add_parser("locate", help="Print the on-disk path of the volume.")
+    vol_locate.add_argument("file", help="Path to a zuv-built .py file.")
+    vol_wipe = vol_sub.add_parser("wipe", help="Delete the persistent volume (data loss).")
+    vol_wipe.add_argument("file", help="Path to a zuv-built .py file.")
+    vol_wipe.add_argument("-y", "--yes", action="store_true", help="Skip confirmation prompt.")
+    vol_backup = vol_sub.add_parser("backup", help="Write a tar.gz of the persistent volume.")
+    vol_backup.add_argument("file", help="Path to a zuv-built .py file.")
+    vol_backup.add_argument("-o", "--output", default=None, help="Output tar.gz path.")
 
     run = sub.add_parser(
         "run",
@@ -196,7 +216,13 @@ def main(argv: list[str] | None = None) -> int:
         return inspect(Path(args.file).expanduser().resolve())
 
     if args.command == "clean":
-        return clean_caches(Path(args.target).expanduser().resolve())
+        return clean_caches(
+            Path(args.target).expanduser().resolve(),
+            include_data=args.data,
+        )
+
+    if args.command == "volume":
+        return _volume_cli(args)
 
     if args.command == "run":
         target = Path(args.file).expanduser().resolve()
@@ -213,6 +239,82 @@ def main(argv: list[str] | None = None) -> int:
             return 127
 
     parser.print_help()
+    return 1
+
+
+def _volume_dirname(mount: str) -> str:
+    return mount.strip("/\\").replace("\\", "/").replace("/", "_")
+
+
+def _read_volume_path(bundle: Path) -> str | None:
+    """Parse the bundle for `_ZUV_VOLUME_PATH`. Returns the path, or None if
+    the bundle has no volume configured / isn't a zuv-built file."""
+    try:
+        text = bundle.read_text(encoding="utf-8", errors="ignore")
+    except OSError as e:
+        print(f"error: cannot read {bundle}: {e}", file=sys.stderr)
+        return None
+    m = re.search(rf'^{re.escape(VOLUME_VAR)}\s*=\s*[\'"]([^\'"]*)[\'"]', text, re.MULTILINE)
+    return m.group(1) if m else None
+
+
+def _volume_cli(args: argparse.Namespace) -> int:
+    bundle = Path(args.file).expanduser().resolve()
+    if not bundle.is_file():
+        print(f"error: not a file: {bundle}", file=sys.stderr)
+        return 2
+    mount = _read_volume_path(bundle)
+    if mount is None:
+        print(f"error: not a zuv-built file (no {VOLUME_VAR}): {bundle}", file=sys.stderr)
+        return 2
+    if not mount:
+        print(f"error: bundle has no [tool.zuv].volume configured: {bundle}", file=sys.stderr)
+        return 2
+    volume = bundle.parent / ".zuv" / _volume_dirname(mount)
+
+    if args.vol_command == "locate":
+        print(volume)
+        return 0 if volume.exists() else 1
+
+    if args.vol_command == "wipe":
+        if not volume.exists():
+            print(f"nothing to wipe: {volume}")
+            return 0
+        if not args.yes:
+            try:
+                ans = input(f"WARNING: delete {volume}? [y/N] ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                return 1
+            if ans not in ("y", "yes"):
+                print("cancelled")
+                return 0
+        try:
+            shutil.rmtree(volume)
+            print(f"removed {volume}")
+            return 0
+        except OSError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 1
+
+    if args.vol_command == "backup":
+        if not volume.exists():
+            print(f"error: volume does not exist: {volume}", file=sys.stderr)
+            return 1
+        out = args.output or f"{bundle.stem}_volume_{int(time.time())}.tar.gz"
+        out_path = Path(out).expanduser().resolve()
+        try:
+            with tarfile.open(out_path, "w:gz") as tf:
+                for item in volume.rglob("*"):
+                    if item.name == VOLUME_MARKER:
+                        continue
+                    tf.add(item, arcname=item.relative_to(volume).as_posix())
+            print(f"backed up {volume} -> {out_path}")
+            return 0
+        except (OSError, tarfile.TarError) as e:
+            print(f"error: backup failed: {e}", file=sys.stderr)
+            return 1
+
     return 1
 
 

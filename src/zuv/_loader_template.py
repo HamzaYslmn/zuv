@@ -17,11 +17,14 @@ Globals injected by the builder above this code:
   _ZUV_UPDATE_REPO:     str  "user/repo" to self-update from (empty = disabled)
   _ZUV_UPDATE_TAG:      str  release tag, or "latest" for the rolling release
   _ZUV_UPDATE_FILE:     str  asset filename inside the release
+  _ZUV_VOLUME_PATH:     str  relative project path mounted as persistent volume ("" = disabled)
 """
 import base64
 import hashlib
 import io
+import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -34,8 +37,11 @@ from pathlib import Path
 
 _DROP_ENV = ("VIRTUAL_ENV", "UV_PROJECT_ENVIRONMENT", "PYTHONHOME", "PYTHONPATH")
 _READY = ".zuv-ready"
+_VOLUME_MARKER = ".zuv-volume"
 _MAX_BYTES = int(os.environ.get("ZUV_MAX_EXTRACT_BYTES", str(2 * 1024 * 1024 * 1024)))
 _UPDATE_SHA_FILE = ".zuv-update-known-sha"  # last sha seen (installed or declined)
+_UPDATE_SHA_FILE_PRE = ".zuv-update-known-sha.pre"  # same, for --prerelease channel
+_PRERELEASE_TAG_RE = re.compile(r"(?:^|[-.+_])(rc|alpha|beta|pre|dev|a|b)\d*", re.I)
 _DEBUG = bool(os.environ.get("ZUV_DEBUG"))
 
 
@@ -62,6 +68,71 @@ def _cache_root(script: Path) -> Path:
     xdg = os.environ.get("XDG_CACHE_HOME") or os.environ.get("LOCALAPPDATA")
     base = Path(xdg) if xdg else Path.home() / ".cache"
     return base / "zuv"
+
+
+def _volume_dirname(mount: str) -> str:
+    # Flatten the mount path so on-disk volume is a single child of cache_root.
+    return mount.strip("/\\").replace("\\", "/").replace("/", "_")
+
+
+def _mount_volume(extract_dir: Path, cache_root: Path, mount: str) -> Path | None:
+    """Promote-on-first-create, then symlink/junction. Returns the persistent
+    volume path, or None if mounting failed."""
+    persistent = cache_root / _volume_dirname(mount)
+    target = extract_dir / mount
+    fresh = not persistent.exists()
+    if fresh:
+        persistent.parent.mkdir(parents=True, exist_ok=True)
+        # Docker-style seed: if developer shipped content at <project>/<mount>,
+        # the first extraction becomes the initial volume.
+        if target.exists() and not target.is_symlink() and target.is_dir():
+            target.rename(persistent)
+        else:
+            persistent.mkdir(parents=True, exist_ok=True)
+        try:
+            (persistent / _VOLUME_MARKER).touch()
+        except OSError:
+            pass
+    # Fast-path: already correctly mounted (covers symlinks AND NTFS junctions).
+    if target.exists():
+        try:
+            if target.resolve() == persistent.resolve():
+                return persistent
+        except OSError:
+            pass
+    if target.exists() or target.is_symlink():
+        try:
+            if target.is_symlink() or target.is_file():
+                target.unlink()
+            else:
+                # On Windows a junction looks like a regular dir; rmdir handles it.
+                try:
+                    target.rmdir()
+                except OSError:
+                    shutil.rmtree(target, ignore_errors=True)
+        except OSError:
+            pass
+    target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.symlink(persistent, target, target_is_directory=True)
+        return persistent
+    except OSError:
+        if sys.platform != "win32":
+            print(f"zuv: warning: could not mount volume at {target}", file=sys.stderr)
+            return None
+    try:
+        subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(target), str(persistent)],
+            check=True, capture_output=True, text=True, timeout=5,
+        )
+        return persistent
+    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired) as e:
+        print(
+            f"zuv: warning: could not mount volume at {target} ({e}); "
+            f"persistent data path {persistent} will not be visible to the app.",
+            file=sys.stderr,
+        )
+        return None
 
 
 def _extract(payload: bytes, dst: Path) -> None:
@@ -98,6 +169,49 @@ def _asset_url(repo: str, tag: str, file: str, provider: str) -> str:
     return f"https://github.com/{repo}/releases/download/{tag}/{file}"
 
 
+def _resolve_prerelease_tag(repo: str, provider: str, headers: dict) -> str | None:
+    """Return the tag of the most-recent prerelease, or None if we couldn't find
+    one. Uses the provider's listing API (rate-limited; only hit when the user
+    explicitly opted in via --prerelease).
+
+    GitHub: filter by the `prerelease: true` flag.
+    GitLab: no first-class prerelease flag; treat `upcoming_release` or a tag
+    matching common prerelease suffixes (rc/alpha/beta/pre/dev) as prerelease.
+    """
+    if provider == "gitlab":
+        proj = urllib.parse.quote(repo, safe="")
+        api = f"https://gitlab.com/api/v4/projects/{proj}/releases?per_page=30"
+    else:
+        api = f"https://api.github.com/repos/{repo}/releases?per_page=30"
+    _dbg(f"GET {api} (prerelease lookup)")
+    try:
+        req = urllib.request.Request(api, headers=headers)
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except (urllib.error.URLError, OSError, ValueError, TimeoutError) as e:
+        print(
+            f"zuv: prerelease lookup failed ({e}); running local version.",
+            file=sys.stderr,
+        )
+        return None
+    if not isinstance(data, list):
+        return None
+    for rel in data:
+        if not isinstance(rel, dict):
+            continue
+        tag = rel.get("tag_name") or rel.get("name") or ""
+        if not tag:
+            continue
+        if provider == "github":
+            if rel.get("prerelease"):
+                return tag
+        else:
+            if rel.get("upcoming_release") or _PRERELEASE_TAG_RE.search(tag):
+                return tag
+    _dbg("no prerelease found in listing")
+    return None
+
+
 def _auth_headers(provider: str) -> dict:
     """User-Agent + appropriate auth header for the provider, if a token is
     set in the environment. Lets private repos work with no extra plumbing."""
@@ -114,7 +228,7 @@ def _auth_headers(provider: str) -> dict:
     return headers
 
 
-def _check_update_inner(script: Path, cache_root: Path) -> None:
+def _check_update_inner(script: Path, cache_root: Path, prerelease: bool) -> None:
     """Implementation of the update check. Raises on any non-network error;
     the outer wrapper catches everything to keep the app non-blocking."""
     if not _ZUV_UPDATE_REPO or not _ZUV_UPDATE_FILE:  # noqa: F821
@@ -125,8 +239,15 @@ def _check_update_inner(script: Path, cache_root: Path) -> None:
         return
 
     provider = _ZUV_UPDATE_PROVIDER  # noqa: F821
-    url = _asset_url(_ZUV_UPDATE_REPO, _ZUV_UPDATE_TAG, _ZUV_UPDATE_FILE, provider)  # noqa: F821
     headers = _auth_headers(provider)
+    tag = _ZUV_UPDATE_TAG  # noqa: F821
+    if prerelease:
+        resolved = _resolve_prerelease_tag(_ZUV_UPDATE_REPO, provider, headers)  # noqa: F821
+        if resolved is None:
+            return
+        tag = resolved
+        _dbg(f"--prerelease resolved tag={tag!r}")
+    url = _asset_url(_ZUV_UPDATE_REPO, tag, _ZUV_UPDATE_FILE, provider)  # noqa: F821
 
     # Use HEAD on the CDN-served asset URL (not the API) for change detection.
     # The CDN isn't subject to the 60/hr unauthenticated API rate limit, so
@@ -154,7 +275,7 @@ def _check_update_inner(script: Path, cache_root: Path) -> None:
         return
     _dbg(f"change_token={change_token!r}")
 
-    sha_cache = cache_root / _UPDATE_SHA_FILE
+    sha_cache = cache_root / (_UPDATE_SHA_FILE_PRE if prerelease else _UPDATE_SHA_FILE)
     try:
         known = sha_cache.read_text(encoding="ascii").strip()
     except OSError:
@@ -175,9 +296,10 @@ def _check_update_inner(script: Path, cache_root: Path) -> None:
         f" (current local version: {_ZUV_APP_VERSION})"  # noqa: F821
         if _ZUV_APP_VERSION else ""
     )
+    channel = " [prerelease]" if prerelease else ""
     print(
-        f"zuv: update available for {provider}:{_ZUV_UPDATE_REPO}"  # noqa: F821
-        f" (release {_ZUV_UPDATE_TAG}, asset {_ZUV_UPDATE_FILE}){version_line}",  # noqa: F821
+        f"zuv: update available for {provider}:{_ZUV_UPDATE_REPO}{channel}"  # noqa: F821
+        f" (release {tag}, asset {_ZUV_UPDATE_FILE}){version_line}",  # noqa: F821
         file=sys.stderr,
     )
     if auto:
@@ -227,18 +349,23 @@ def _check_update_inner(script: Path, cache_root: Path) -> None:
     # Re-exec the new bundle. On Windows os.execvp has flaky parent-process
     # behaviour; subprocess + exit is reliable everywhere.
     print(f"zuv: re-exec via `uv run {script.name}`", file=sys.stderr, flush=True)
-    rc = subprocess.call(["uv", "run", str(script), *sys.argv[1:]])
+    forward = sys.argv[1:]
+    if prerelease and "--prerelease" not in forward:
+        # Keep the channel sticky across re-exec so the new bundle also self-
+        # updates on the prerelease track rather than reverting to stable.
+        forward = ["--prerelease", *forward]
+    rc = subprocess.call(["uv", "run", str(script), *forward])
     sys.exit(rc)
 
 
-def _check_update(script: Path, cache_root: Path) -> None:
+def _check_update(script: Path, cache_root: Path, prerelease: bool) -> None:
     """Catch-all wrapper for the update check. Quietly swallows any
     unexpected error so a broken update path never blocks the app. Set
     ZUV_DEBUG=1 to see what happened (and ZUV_AUTO_UPDATE=1 to skip the
     interactive prompt — for testing / CI / scripted deploys).
     """
     try:
-        _check_update_inner(script, cache_root)
+        _check_update_inner(script, cache_root, prerelease)
     except SystemExit:
         raise  # re-exec path; let it through
     except Exception as e:
@@ -251,8 +378,16 @@ def _check_update(script: Path, cache_root: Path) -> None:
 def _run():
     script = Path(sys.argv[0]).resolve()
 
+    # `--prerelease` is a loader-level flag: when present, route the self-update
+    # check to the latest prerelease instead of the stable release. Strip it
+    # from argv before forwarding so the embedded app doesn't see it.
+    prerelease = False
+    if "--prerelease" in sys.argv[1:]:
+        prerelease = True
+        sys.argv = [sys.argv[0]] + [a for a in sys.argv[1:] if a != "--prerelease"]
+
     cache_root = _cache_root(script)
-    _check_update(script, cache_root)
+    _check_update(script, cache_root, prerelease)
     cache = cache_root / f"{script.stem}_{_ZUV_BUILD_ID}"  # noqa: F821
     ready = cache / _READY
 
@@ -314,6 +449,9 @@ def _run():
             except Exception as e:
                 print(f"zuv: warning: bytecode pre-compile skipped: {e}", file=sys.stderr)
 
+        if _ZUV_VOLUME_PATH:  # noqa: F821
+            _mount_volume(cache, cache_root, _ZUV_VOLUME_PATH)  # noqa: F821
+
         ready.write_text(_ZUV_SHA, encoding="ascii")  # noqa: F821
 
         removed = 0
@@ -323,6 +461,8 @@ def _run():
                 continue
             if not sibling.is_dir() or sibling.is_symlink():
                 continue
+            if (sibling / _VOLUME_MARKER).exists():
+                continue  # persistent volume - never GC
             shutil.rmtree(sibling, ignore_errors=True)
             removed += 1
 
@@ -330,6 +470,10 @@ def _run():
         if removed:
             msg += f"; gc'd {removed} old build{'s' if removed != 1 else ''}"
         print(msg + "; future runs skip extraction", file=sys.stderr)
+
+    # Warm-cache: re-mount the volume on every run so a missing/broken link heals itself.
+    if _ZUV_VOLUME_PATH:  # noqa: F821
+        _mount_volume(cache, cache_root, _ZUV_VOLUME_PATH)  # noqa: F821
 
     env = {k: v for k, v in os.environ.items() if k not in _DROP_ENV}
     if _ZUV_HAS_WHEELS:  # noqa: F821

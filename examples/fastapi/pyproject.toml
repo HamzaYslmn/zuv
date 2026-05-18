@@ -10,3 +10,6 @@ dependencies = [
     "uvicorn",
     "zuv>=0.0.1",
 ]
+
+[tool.zuv]
+volume = "data"

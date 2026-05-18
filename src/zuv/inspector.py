@@ -18,6 +18,7 @@ from .constants import (
     UPDATE_PROVIDER_VAR,
     UPDATE_REPO_VAR,
     UPDATE_TAG_VAR,
+    VOLUME_VAR,
 )
 
 
@@ -92,6 +93,10 @@ def inspect(path: Path) -> int:
         tag = _find_str(text, UPDATE_TAG_VAR) or "?"
         file = _find_str(text, UPDATE_FILE_VAR) or "?"
         print(f"Updates:   {provider}:{repo} (release {tag}, asset {file})")
+
+    volume = _find_str(text, VOLUME_VAR)
+    if volume:
+        print(f"Volume:    {volume} (persisted across versions)")
 
     print()
     print("PEP 723 metadata:")

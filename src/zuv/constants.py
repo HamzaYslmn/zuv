@@ -11,7 +11,9 @@ UPDATE_REPO_VAR = "_ZUV_UPDATE_REPO"
 UPDATE_TAG_VAR = "_ZUV_UPDATE_TAG"
 UPDATE_FILE_VAR = "_ZUV_UPDATE_FILE"
 APP_VERSION_VAR = "_ZUV_APP_VERSION"
+VOLUME_VAR = "_ZUV_VOLUME_PATH"
 WHEELS_DIRNAME = "_zuv_wheels"
+VOLUME_MARKER = ".zuv-volume"
 # User-facing label -> list of pip --platform tags. Multiple tags per target
 # let pip match newer manylinux/macos variants too.
 WHEEL_PLATFORMS: dict[str, list[str]] = {

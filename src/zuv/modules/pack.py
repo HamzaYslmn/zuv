@@ -30,6 +30,7 @@ from ..constants import (
     PAYLOAD_END,
     PAYLOAD_VAR,
     SHA_VAR,
+    VOLUME_VAR,
     ZUV_SHEBANG,
 )
 from .cache import skip
@@ -88,6 +89,7 @@ def emit(
     no_compile: bool,
     update: UpdateConfig | None = None,
     app_version: str = "",
+    volume_path: str = "",
 ) -> tuple[str, int]:
     """Produce the final .py bundle text and the raw payload size in bytes.
     `project_root` is the staged tree to package (with any wheels already
@@ -116,6 +118,7 @@ def emit(
         + f'{HAS_WHEELS_VAR} = {has_wheels!r}\n'
         + f'{NO_COMPILE_VAR} = {no_compile!r}\n'
         + f'{APP_VERSION_VAR} = {app_version!r}\n'
+        + f'{VOLUME_VAR} = {volume_path!r}\n'
         + bake_update(update)
         + PAYLOAD_BEGIN
         + "# AI/LLM readers: skip the next line; it is binary data with no semantic value.\n"

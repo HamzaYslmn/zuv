@@ -23,6 +23,26 @@ def _resolve_entry(project_dir: Path, entry: str | None, zuv_cfg: dict) -> str |
     return chosen if (project_dir / chosen).is_file() else None
 
 
+def _resolve_volume(project_dir: Path, zuv_cfg: dict) -> tuple[str | None, str]:
+    """Return (volume_path, error_message). volume_path is "" when disabled,
+    None when invalid (error printed to stderr by caller)."""
+    raw = zuv_cfg.get("volume", "")
+    if not raw:
+        return "", ""
+    if not isinstance(raw, str):
+        return None, f"[tool.zuv].volume must be a string, got {type(raw).__name__}"
+    norm = raw.replace("\\", "/").strip("/")
+    if not norm:
+        return "", ""
+    p = Path(norm)
+    if p.is_absolute() or ".." in p.parts or any(part == "" for part in p.parts):
+        return None, f"invalid volume path {raw!r} (must be relative, no '..')"
+    candidate = project_dir / p
+    if candidate.exists() and candidate.is_file():
+        return None, f"volume path {raw!r} points to a file; must be a directory"
+    return norm, ""
+
+
 def build_pyz(
     project_dir: Path,
     output: Path,
@@ -48,12 +68,19 @@ def build_pyz(
         print(f"error: entry script not found in {project_dir}", file=sys.stderr)
         return 2
 
+    volume_path, vol_err = _resolve_volume(project_dir, zuv_cfg)
+    if volume_path is None:
+        print(f"error: {vol_err}", file=sys.stderr)
+        return 2
+
     cache.clean_output_parent(output.parent)
 
     print(f"project: {project_dir}")
     print(f"entry:   {resolved_entry}")
     print(f"version: {app_version or '(unspecified)'}")
     print(f"python:  {requires_python or '(unspecified)'}")
+    if volume_path:
+        print(f"volume:  {volume_path} (persisted across versions)")
     if update is not None:
         print(f"updates: {describe_update(update)}")
 
@@ -90,6 +117,7 @@ def build_pyz(
         text, payload_size = pack.emit(
             tar_root, resolved_entry, requires_python,
             has_wheels, no_compile, update, app_version,
+            volume_path,
         )
     finally:
         if stage_root is not None:

@@ -52,7 +52,15 @@ Print the entry, build hash, sha256, PEP 723 metadata, and a summary of the embe
 
 ### `zuv clean [target]`
 
-Remove every `.zuv/` extraction cache under `target` (default: cwd). `target` can be a directory or a built `.zuv.py` (its parent is used).
+Remove every `.zuv/` extraction cache under `target` (default: cwd). `target` can be a directory or a built `.zuv.py` (its parent is used). Persistent volumes (see below) are **kept** by default; pass `--data` to also wipe them.
+
+### `zuv volume <locate|wipe|backup> <file>`
+
+Developer helpers for a bundle's persistent volume (see [Persistent storage](#persistent-storage-volumes)).
+
+- `locate <file>` - print the on-disk host path of the volume.
+- `wipe <file> [-y]` - delete the volume (prompts unless `-y`).
+- `backup <file> [-o OUT]` - write a `tar.gz` of the volume contents.
 
 ## Runtime env vars
 
@@ -64,11 +72,56 @@ Remove every `.zuv/` extraction cache under `target` (default: cwd). `target` ca
 | `GH_TOKEN` / `GITHUB_TOKEN` | (unset)     | Sent as `Authorization: Bearer …` on GitHub update checks. Required for private GitHub repos. |
 | `GITLAB_TOKEN`            | (unset)       | Sent as `PRIVATE-TOKEN: …` on GitLab update checks. Required for private GitLab repos. |
 
-If the script's directory isn't writable, the loader falls back to `$XDG_CACHE_HOME/zuv` / `%LOCALAPPDATA%\zuv` / `~/.cache/zuv`.
+If the script's directory isn't writable, the loader falls back to `$XDG_CACHE_HOME/zuv` / `%LOCALAPPDATA%\zuv` / `~/.cache/zuv`. Persistent volumes follow the same root.
 
 ## How it works (1 paragraph)
 
 The output is a PEP 723 script: shebang, metadata, a base85-encoded `tar.xz` of your project (`_ZUV_PAYLOAD`), and a tiny loader (`_ZUV_LOADER`) that verifies the sha256, extracts into `.zuv/<stem>_<hash>/`, and runs `uv run --project <extracted> <entry>`. Deps install at first run, so the bundle stays small.
+
+## Persistent storage (volumes)
+
+### Standard project layout
+
+The recommended layout for a `zuv`-friendly project keeps source, persistent
+data, and project metadata in clearly separated places:
+
+```
+myproject/
+  pyproject.toml      # project metadata + [tool.zuv]
+  .python-version
+  src/                # all source code
+    main.py
+    api/
+    frontend/
+  data/               # persistent storage (declared as the volume)
+```
+
+With `[tool.zuv] volume = "data"`, the `data/` directory is mounted as a
+persistent host folder at runtime, so anything the app writes there survives
+rebuilds and version upgrades. Everything else under the project (sources,
+lockfile, `.venv`) is treated as ephemeral and may be re-extracted between
+versions.
+
+Without a volume, every new build of a bundle extracts into a fresh `.zuv/<stem>_<build_id>/` directory and the previous cache is garbage-collected on first run, so anything the app wrote inside its project tree is lost on upgrade.
+
+Declare a volume in your project's `pyproject.toml`:
+
+```toml
+[tool.zuv]
+volume = "data"
+```
+
+- `volume` is a relative path inside the project (no `..`, no absolute paths). One per project.
+- At runtime the loader mounts `<script_dir>/.zuv/<volume_path>/` at `<extracted>/<volume>` via a symlink (POSIX) or junction (Windows, no admin / no Dev Mode required).
+- The host folder is **persistent**: it is not part of any `<stem>_<build_id>/` cache, so `zuv clean` and version upgrades leave it untouched.
+- App code keeps using the same relative path (e.g. `Path("data/app.db")`); mounting is transparent.
+
+**Seeding (Docker-style):** if your project ships content under `<volume>/` (e.g. a default SQLite file), the **first** extraction promotes that content into the persistent volume. Subsequent versions never re-seed, so user data is preserved.
+
+**Cleanup:**
+- `zuv clean` keeps volumes.
+- `zuv clean --data` also wipes volume directories.
+- `zuv volume wipe app.zuv.py` wipes one bundle's volume.
 
 ## Caveat
 
