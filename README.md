@@ -2,13 +2,13 @@
 
 # zuv
 
-**Pack your uv project into one `.py` file.** Hand it over, drop it on a server, email it — `uv run app.zuv.py` and it works.
+**Pack your uv project into one `.py` file.** Hand it over, drop it on a server, email it - `uv run app.zuv.py` and it works.
 
 ## Why
 
 - **One file, no setup.** No zip + README + `requirements.txt` + venv dance. Recipient runs one command.
 - **Cross-platform, cross-Python.** Same file works on Windows / Linux / macOS and any Python minor version (bytecode is built on the target).
-- **Tiny.** ~10 KB even for a FastAPI app — deps install at first run, they're not embedded (unless you ask with `--deps`).
+- **Tiny.** ~10 KB even for a FastAPI app - deps install at first run, they're not embedded (unless you ask with `--deps`).
 - **Just uv.** No bespoke runtime, no PyInstaller-style freezing. The bundle is a PEP 723 script; `uv run` is the entrypoint.
 
 ## Install
@@ -122,6 +122,8 @@ volume = "data"
 - `zuv clean` keeps volumes.
 - `zuv clean --data` also wipes volume directories.
 - `zuv volume wipe app.zuv.py` wipes one bundle's volume.
+
+**Filesystem support:** mounting needs a filesystem that allows symlinks (POSIX) or junctions (NTFS on Windows). It will fail on FAT32 / exFAT USB sticks, some SMB / network shares, and some VM shared folders. If the bundle lives on such a volume, set `ZUV_CACHE_DIR` to a path on a normal local disk (e.g. `%LOCALAPPDATA%\zuv` on Windows or `~/.cache/zuv` on Linux/macOS); the volume will then mount under that path while the bundle itself stays on the original drive. If both fail, the loader prints a warning and the app runs without persistence (data stays inside the per-build extract dir and is lost on upgrade).
 
 ## Caveat
 

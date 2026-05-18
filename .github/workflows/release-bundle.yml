@@ -2,7 +2,7 @@ name: release bundle
 
 # Build a zuv bundle and upload it as an asset to the `latest` release when a
 # commit message contains `release <name>`. Multi-bundle repos work the same
-# way: `release fastapi`, `release dashboard`, etc. — each commit re-uploads
+# way: `release fastapi`, `release dashboard`, etc. - each commit re-uploads
 # only its own asset (with --clobber), so other bundles in the release stay
 # untouched and their recipients aren't prompted to update.
 #

@@ -48,7 +48,7 @@ def main(argv: list[str] | None = None) -> int:
     build.add_argument(
         "-o", "--output",
         default=None,
-        help="Output file path. Default: <cwd>/dist/<project-name>.py.",
+        help="Output file path. Default: <cwd>/dist/<project-name>.zuv.py (or .zuv.zip with --zip).",
     )
     build.add_argument(
         "-e", "--entry",
@@ -98,7 +98,7 @@ def main(argv: list[str] | None = None) -> int:
         metavar="TAG",
         help=(
             "Release tag to fetch the asset from. Default: 'latest' (special "
-            "value: hits the provider's `/releases/latest` endpoint — the most "
+            "value: hits the provider's `/releases/latest` endpoint - the most "
             "recently-published release). Any other value pins to that tag."
         ),
     )
@@ -130,7 +130,7 @@ def main(argv: list[str] | None = None) -> int:
         "target",
         nargs="?",
         default=".",
-        help="Directory to walk (or a built .py — its parent is used). Default: cwd.",
+        help="Directory to walk (or a built .py - its parent is used). Default: cwd.",
     )
     clean.add_argument(
         "--data",

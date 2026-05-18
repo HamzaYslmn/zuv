@@ -65,8 +65,11 @@ def _cache_root(script: Path) -> Path:
         return candidate
     except OSError:
         pass
-    xdg = os.environ.get("XDG_CACHE_HOME") or os.environ.get("LOCALAPPDATA")
-    base = Path(xdg) if xdg else Path.home() / ".cache"
+    if sys.platform == "win32":
+        base_env = os.environ.get("LOCALAPPDATA") or os.environ.get("XDG_CACHE_HOME")
+    else:
+        base_env = os.environ.get("XDG_CACHE_HOME") or os.environ.get("LOCALAPPDATA")
+    base = Path(base_env) if base_env else Path.home() / ".cache"
     return base / "zuv"
 
 
@@ -152,7 +155,7 @@ def _extract(payload: bytes, dst: Path) -> None:
 
 def _asset_url(repo: str, tag: str, file: str, provider: str) -> str:
     """CDN-served direct download URL for a release asset. Used for both the
-    cheap HEAD freshness check and the GET download — both go through the
+    cheap HEAD freshness check and the GET download - both go through the
     asset CDN, not the API, so no 60/hr unauthenticated rate limit applies.
     """
     if provider == "gitlab":
@@ -362,7 +365,7 @@ def _check_update(script: Path, cache_root: Path, prerelease: bool) -> None:
     """Catch-all wrapper for the update check. Quietly swallows any
     unexpected error so a broken update path never blocks the app. Set
     ZUV_DEBUG=1 to see what happened (and ZUV_AUTO_UPDATE=1 to skip the
-    interactive prompt — for testing / CI / scripted deploys).
+    interactive prompt - for testing / CI / scripted deploys).
     """
     try:
         _check_update_inner(script, cache_root, prerelease)
@@ -375,7 +378,7 @@ def _check_update(script: Path, cache_root: Path, prerelease: bool) -> None:
             traceback.print_exc(file=sys.stderr)
 
 
-def _run():
+def _run() -> int:
     script = Path(sys.argv[0]).resolve()
 
     # `--prerelease` is a loader-level flag: when present, route the self-update

@@ -7,7 +7,7 @@ deriving defaults, and baking the four `_ZUV_UPDATE_*` globals into the .py.
 
 Updates pull from the GitHub or GitLab Releases API. Recipients see a prompt
 when an asset's id changes (GitHub) or the release's released_at changes
-(GitLab) — i.e. when the publisher re-uploads the bundle.
+(GitLab) - i.e. when the publisher re-uploads the bundle.
 """
 from dataclasses import dataclass
 from pathlib import Path
@@ -101,7 +101,7 @@ def from_cli(
 
 def bake(cfg: UpdateConfig | None) -> str:
     """Return the Python assignment lines that the loader template reads on
-    startup. When `cfg` is None, all values are empty / defaults — the loader
+    startup. When `cfg` is None, all values are empty / defaults - the loader
     checks `repo` and skips the update path when empty."""
     provider = cfg.provider if cfg else DEFAULT_PROVIDER
     repo = cfg.repo if cfg else ""
