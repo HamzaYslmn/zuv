@@ -479,6 +479,7 @@ def _run() -> int:
         _mount_volume(cache, cache_root, _ZUV_VOLUME_PATH)  # noqa: F821
 
     env = {k: v for k, v in os.environ.items() if k not in _DROP_ENV}
+    env["IS_ZUV"] = "true"
     if _ZUV_HAS_WHEELS:  # noqa: F821
         wheels_dir = cache / "_zuv_wheels"
         if wheels_dir.is_dir():
