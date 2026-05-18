@@ -12,4 +12,5 @@ dependencies = [
 ]
 
 [tool.zuv]
+entry = "src/main.py"
 volume = "data"
