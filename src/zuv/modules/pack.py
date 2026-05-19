@@ -31,7 +31,6 @@ from ..constants import (
     PAYLOAD_VAR,
     SHA_VAR,
     VOLUME_VAR,
-    ZUV_SHEBANG,
 )
 from .cache import skip
 from .updater import UpdateConfig, bake as bake_update
@@ -110,8 +109,7 @@ def emit(
     pep723 += "# dependencies = []\n# ///\n"
 
     text = (
-        ZUV_SHEBANG
-        + pep723
+        pep723
         + f'{ENTRY_VAR} = "{entry}"\n'
         + f'{BUILD_ID_VAR} = "{build_id[:16]}"\n'
         + f'{SHA_VAR} = "{payload_sha}"\n'

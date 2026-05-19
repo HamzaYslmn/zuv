@@ -76,7 +76,7 @@ If the script's directory isn't writable, the loader falls back to `$XDG_CACHE_H
 
 ## How it works (1 paragraph)
 
-The output is a PEP 723 script: shebang, metadata, a base85-encoded `tar.xz` of your project (`_ZUV_PAYLOAD`), and a tiny loader (`_ZUV_LOADER`) that verifies the sha256, extracts into `.zuv/<stem>_<hash>/`, and runs `uv run --project <extracted> <entry>`. Deps install at first run, so the bundle stays small.
+The output is a PEP 723 script: metadata, a base85-encoded `tar.xz` of your project (`_ZUV_PAYLOAD`), and a tiny loader (`_ZUV_LOADER`) that verifies the sha256, extracts into `.zuv/<stem>_<hash>/`, and runs `uv run --project <extracted> <entry>`. Deps install at first run, so the bundle stays small.
 
 ## Persistent storage (volumes)
 
