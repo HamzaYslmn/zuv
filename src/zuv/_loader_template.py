@@ -240,6 +240,9 @@ def _check_update_inner(script: Path, cache_root: Path, prerelease: bool) -> Non
     if os.environ.get("ZUV_NO_UPDATE"):
         _dbg("update disabled (ZUV_NO_UPDATE=1)")
         return
+    if (cache_root / ".zuv-update-disabled").exists():
+        _dbg("update disabled (.zuv-update-disabled sentinel present)")
+        return
 
     provider = _ZUV_UPDATE_PROVIDER  # noqa: F821
     headers = _auth_headers(provider)
@@ -480,6 +483,7 @@ def _run() -> int:
 
     env = {k: v for k, v in os.environ.items() if k not in _DROP_ENV}
     env["IS_ZUV"] = "true"
+    env["ZUV_CACHE_ROOT"] = str(cache_root)
     if _ZUV_HAS_WHEELS:  # noqa: F821
         wheels_dir = cache / "_zuv_wheels"
         if wheels_dir.is_dir():
