@@ -41,6 +41,7 @@ _VOLUME_MARKER = ".zuv-volume"
 _MAX_BYTES = int(os.environ.get("ZUV_MAX_EXTRACT_BYTES", str(2 * 1024 * 1024 * 1024)))
 _UPDATE_SHA_FILE = ".zuv-update-known-sha"  # last sha seen (installed or declined)
 _UPDATE_SHA_FILE_PRE = ".zuv-update-known-sha.pre"  # same, for --prerelease channel
+_LINK_MODE_FILE = ".zuv-link-mode"
 _PRERELEASE_TAG_RE = re.compile(r"(?:^|[-.+_])(rc|alpha|beta|pre|dev|a|b)\d*", re.I)
 _DEBUG = bool(os.environ.get("ZUV_DEBUG"))
 
@@ -71,6 +72,50 @@ def _cache_root(script: Path) -> Path:
         base_env = os.environ.get("XDG_CACHE_HOME") or os.environ.get("LOCALAPPDATA")
     base = Path(base_env) if base_env else Path.home() / ".cache"
     return base / "zuv"
+
+
+def _hardlinks_work(cache_root: Path) -> bool:
+    """Probe whether os.link works inside cache_root. Hardlinks can't cross
+    volumes (any OS) and some filesystems (exFAT/FAT32, certain SMB/NFS mounts,
+    WSL drvfs) don't support them at all. Probe once, cache the verdict so the
+    next run is free."""
+    flag = cache_root / _LINK_MODE_FILE
+    try:
+        return flag.read_text(encoding="ascii").strip() == "hardlink"
+    except OSError:
+        pass
+    src = dst = None
+    try:
+        cache_root.mkdir(parents=True, exist_ok=True)
+        src = cache_root / f".zuv-linkprobe-src-{os.getpid()}"
+        dst = cache_root / f".zuv-linkprobe-dst-{os.getpid()}"
+        src.write_bytes(b"")
+        dst.unlink(missing_ok=True)
+        os.link(src, dst)
+        works = True
+    except (OSError, NotImplementedError, AttributeError):
+        works = False
+    finally:
+        for p in (src, dst):
+            if p is not None:
+                p.unlink(missing_ok=True)
+    try:
+        flag.write_text("hardlink" if works else "copy", encoding="ascii")
+    except OSError:
+        pass
+    return works
+
+
+def _uv_env(cache_root: Path) -> dict:
+    """Cross-platform uv environment: keep uv's package cache on the same
+    volume as the venv so hardlinks succeed, and fall back to copy mode when
+    the filesystem can't hardlink at all. Respects user overrides."""
+    env = {k: v for k, v in os.environ.items() if k not in _DROP_ENV}
+    if "UV_CACHE_DIR" not in env:
+        env["UV_CACHE_DIR"] = str(cache_root / "uv-cache")
+    if "UV_LINK_MODE" not in env and not _hardlinks_work(cache_root):
+        env["UV_LINK_MODE"] = "copy"
+    return env
 
 
 def _volume_dirname(mount: str) -> str:
@@ -116,26 +161,62 @@ def _mount_volume(extract_dir: Path, cache_root: Path, mount: str) -> Path | Non
         except OSError:
             pass
     target.parent.mkdir(parents=True, exist_ok=True)
+
+    # On Windows, junction is tried first because it works on NTFS/ReFS without
+    # admin or Developer Mode. /D is the fallback for SMB shares where /J can't
+    # resolve. os.symlink last covers anything the cmd.exe path misses.
+    if sys.platform == "win32":
+        attempts = (("junction", "/J"), ("dir-symlink", "/D"), ("os.symlink", None))
+    else:
+        attempts = (("symlink", None),)
+
+    errors: list[str] = []
+    for name, flag in attempts:
+        try:
+            if flag is None:
+                os.symlink(persistent, target, target_is_directory=True)
+            else:
+                r = subprocess.run(
+                    ["cmd", "/c", "mklink", flag, str(target), str(persistent)],
+                    capture_output=True, text=True, timeout=5,
+                )
+                if r.returncode != 0:
+                    raise OSError(r.stderr.strip() or f"rc={r.returncode}")
+            return persistent
+        except (OSError, subprocess.SubprocessError, FileNotFoundError) as e:
+            errors.append(f"{name}: {e}")
+
+    print(
+        f"zuv: warning: could not mount volume at {target}.{_fs_hint(target)} "
+        f"Tried: {'; '.join(errors)}. Persistent path {persistent} is unreachable "
+        f"to the app this run.",
+        file=sys.stderr,
+    )
+    return None
+
+
+def _fs_hint(target: Path) -> str:
+    """Return a one-liner naming the filesystem if it's known not to support
+    symlinks/junctions (FAT family), else "". Best-effort, never raises."""
+    if sys.platform != "win32":
+        return ""
     try:
-        os.symlink(persistent, target, target_is_directory=True)
-        return persistent
-    except OSError:
-        if sys.platform != "win32":
-            print(f"zuv: warning: could not mount volume at {target}", file=sys.stderr)
-            return None
-    try:
-        subprocess.run(
-            ["cmd", "/c", "mklink", "/J", str(target), str(persistent)],
-            check=True, capture_output=True, text=True, timeout=5,
-        )
-        return persistent
-    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired) as e:
-        print(
-            f"zuv: warning: could not mount volume at {target} ({e}); "
-            f"persistent data path {persistent} will not be visible to the app.",
-            file=sys.stderr,
-        )
-        return None
+        import ctypes
+        buf = ctypes.create_unicode_buffer(64)
+        drive = os.path.splitdrive(str(target))[0] + "\\"
+        if not (drive and ctypes.windll.kernel32.GetVolumeInformationW(
+            drive, None, 0, None, None, None, buf, 64,
+        )):
+            return ""
+        fs = buf.value
+        if fs.upper() in ("FAT", "FAT32", "EXFAT"):
+            return (
+                f" The target filesystem is {fs}, which does not support "
+                f"symlinks or junctions; move the bundle to an NTFS/ReFS drive."
+            )
+    except (OSError, AttributeError, ImportError):
+        pass
+    return ""
 
 
 def _extract(payload: bytes, dst: Path) -> None:
@@ -441,7 +522,7 @@ def _run() -> int:
         if not _ZUV_NO_COMPILE:  # noqa: F821
             # Strip parent venv vars so uv doesn't print the
             # "VIRTUAL_ENV does not match the project environment" warning.
-            _env = {k: v for k, v in os.environ.items() if k not in _DROP_ENV}
+            _env = _uv_env(cache_root)
             try:
                 rc = subprocess.call(
                     ["uv", "run", "--project", str(cache),
@@ -481,7 +562,7 @@ def _run() -> int:
     if _ZUV_VOLUME_PATH:  # noqa: F821
         _mount_volume(cache, cache_root, _ZUV_VOLUME_PATH)  # noqa: F821
 
-    env = {k: v for k, v in os.environ.items() if k not in _DROP_ENV}
+    env = _uv_env(cache_root)
     env["IS_ZUV"] = "true"
     env["ZUV_CACHE_ROOT"] = str(cache_root)
     if _ZUV_HAS_WHEELS:  # noqa: F821
