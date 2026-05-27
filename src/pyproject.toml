@@ -1,6 +1,6 @@
 [project]
 name = "zuv"
-version = "0.5.4"
+version = "0.5.5"
 description = "Bundle any uv project into a single runnable .py file."
 requires-python = ">=3.13"
 dependencies = []

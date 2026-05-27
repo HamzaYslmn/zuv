@@ -296,6 +296,40 @@ def _resolve_prerelease_tag(repo: str, provider: str, headers: dict) -> str | No
     return None
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Opener handler that turns 3xx into HTTPError instead of following the
+    redirect, so we can read the Location header ourselves."""
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _resolve_display_tag(url: str, provider: str, headers: dict) -> str | None:
+    """For a `/releases/latest/...` asset URL, peek at the first 3xx Location
+    header to recover the real tag (e.g. `v1.6.0`). Returns None if anything
+    goes wrong - callers should fall back to printing 'latest'."""
+    opener = urllib.request.build_opener(_NoRedirect)
+    loc = ""
+    try:
+        req = urllib.request.Request(url, headers=headers, method="HEAD")
+        try:
+            resp = opener.open(req, timeout=5)
+            loc = resp.headers.get("Location") or ""
+        except urllib.error.HTTPError as e:
+            loc = e.headers.get("Location") or ""
+    except (urllib.error.URLError, OSError, TimeoutError, ValueError):
+        return None
+    if not loc:
+        return None
+    if provider == "gitlab":
+        m = re.search(r"/releases/([^/]+)/downloads/", loc)
+    else:
+        m = re.search(r"/releases/download/([^/]+)/", loc)
+    if not m:
+        return None
+    tag = urllib.parse.unquote(m.group(1))
+    return tag if tag and tag != "latest" else None
+
+
 def _auth_headers(provider: str) -> dict:
     """User-Agent + appropriate auth header for the provider, if a token is
     set in the environment. Lets private repos work with no extra plumbing."""
@@ -379,6 +413,13 @@ def _check_update_inner(script: Path, cache_root: Path, prerelease: bool) -> Non
         _dbg("non-TTY and ZUV_AUTO_UPDATE not set; skipping update")
         return
 
+    display_tag = tag
+    if tag == "latest":
+        resolved_display = _resolve_display_tag(url, provider, headers)
+        if resolved_display:
+            display_tag = resolved_display
+            _dbg(f"resolved display tag for 'latest' -> {display_tag!r}")
+
     version_line = (
         f" (current local version: {_ZUV_APP_VERSION})"  # noqa: F821
         if _ZUV_APP_VERSION else ""
@@ -386,7 +427,7 @@ def _check_update_inner(script: Path, cache_root: Path, prerelease: bool) -> Non
     channel = " [prerelease]" if prerelease else ""
     print(
         f"zuv: update available for {provider}:{_ZUV_UPDATE_REPO}{channel}"  # noqa: F821
-        f" (release {tag}, asset {_ZUV_UPDATE_FILE}){version_line}",  # noqa: F821
+        f" (release {display_tag}, asset {_ZUV_UPDATE_FILE}){version_line}",  # noqa: F821
         file=sys.stderr,
     )
     if auto:
@@ -394,7 +435,9 @@ def _check_update_inner(script: Path, cache_root: Path, prerelease: bool) -> Non
         answer = "y"
     else:
         try:
-            answer = input("zuv: install latest version? [Y/n] ").strip().lower()
+            answer = input(
+                f"zuv: install {display_tag}? [Y/n] "
+            ).strip().lower()
         except (EOFError, KeyboardInterrupt):
             _dbg("input cancelled")
             return
