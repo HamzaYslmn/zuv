@@ -362,6 +362,15 @@ def _check_update_inner(script: Path, cache_root: Path, prerelease: bool) -> Non
     provider = _ZUV_UPDATE_PROVIDER  # noqa: F821
     headers = _auth_headers(provider)
     tag = _ZUV_UPDATE_TAG  # noqa: F821
+    version_suffix = (
+        f" (current local version: {_ZUV_APP_VERSION})"  # noqa: F821
+        if _ZUV_APP_VERSION else ""
+    )
+    channel = " [prerelease]" if prerelease else ""
+    print(
+        f"zuv: checking {provider}:{_ZUV_UPDATE_REPO}{channel} for updates...",  # noqa: F821
+        file=sys.stderr,
+    )
     if prerelease:
         resolved = _resolve_prerelease_tag(_ZUV_UPDATE_REPO, provider, headers)  # noqa: F821
         if resolved is None:
@@ -403,15 +412,12 @@ def _check_update_inner(script: Path, cache_root: Path, prerelease: bool) -> Non
         known = ""
     _dbg(f"cached known token={known!r}")
     if change_token == known:
+        print(f"zuv: up to date{version_suffix}", file=sys.stderr)
         _dbg("change-token matches cache; nothing to do")
         return
 
     # Auto-accept mode for headless / scripted invocations.
     auto = bool(os.environ.get("ZUV_AUTO_UPDATE"))
-    # Otherwise, prompt requires a TTY; in CI / pipes / GUI launchers, skip silently.
-    if not auto and not sys.stdin.isatty():
-        _dbg("non-TTY and ZUV_AUTO_UPDATE not set; skipping update")
-        return
 
     display_tag = tag
     if tag == "latest":
@@ -420,14 +426,21 @@ def _check_update_inner(script: Path, cache_root: Path, prerelease: bool) -> Non
             display_tag = resolved_display
             _dbg(f"resolved display tag for 'latest' -> {display_tag!r}")
 
-    version_line = (
-        f" (current local version: {_ZUV_APP_VERSION})"  # noqa: F821
-        if _ZUV_APP_VERSION else ""
-    )
-    channel = " [prerelease]" if prerelease else ""
+    # Otherwise, prompt requires a TTY; in CI / pipes / GUI launchers, surface
+    # the news but skip the interactive install.
+    if not auto and not sys.stdin.isatty():
+        print(
+            f"zuv: update available for {provider}:{_ZUV_UPDATE_REPO}{channel}"  # noqa: F821
+            f" (release {display_tag}, asset {_ZUV_UPDATE_FILE}){version_suffix}; "  # noqa: F821
+            f"run from a terminal or set ZUV_AUTO_UPDATE=1 to install.",
+            file=sys.stderr,
+        )
+        _dbg("non-TTY and ZUV_AUTO_UPDATE not set; skipping interactive install")
+        return
+
     print(
         f"zuv: update available for {provider}:{_ZUV_UPDATE_REPO}{channel}"  # noqa: F821
-        f" (release {display_tag}, asset {_ZUV_UPDATE_FILE}){version_line}",  # noqa: F821
+        f" (release {display_tag}, asset {_ZUV_UPDATE_FILE}){version_suffix}",  # noqa: F821
         file=sys.stderr,
     )
     if auto:
